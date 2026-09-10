@@ -8,12 +8,9 @@ de TTS no esté disponible.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from poc import segmenter, srt  # noqa: E402
+from poc import segmenter, srt
 
 FIXTURE = Path(__file__).parent / "fixtures" / "wordboundaries_es_cr.json"
 

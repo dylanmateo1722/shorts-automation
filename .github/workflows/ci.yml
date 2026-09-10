@@ -1,0 +1,113 @@
+# Gate 1 — núcleo del orquestador.
+#
+# Dos trabajos con propósitos distintos:
+#
+#   tests        rápido y sin motor: la suite usa un motor falso que respeta
+#                el contrato del CLI de MoneyPrinterTurbo.
+#   integration  lento y con el motor real: comprueba que el adaptador
+#                funciona contra MoneyPrinterTurbo de verdad en un runner.
+#
+# No usa ningún secreto. El repositorio es público y sus logs también, así que
+# no se emplea `set -x` ni se vuelca el entorno.
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/gate-1-core]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests del núcleo
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt
+
+      - name: Suite de tests
+        run: .venv/bin/python -m pytest
+
+  integration:
+    name: Integración con el motor real
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout con submódulo del motor
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Registrar el commit fijado del motor
+        run: git -C vendor/moneyprinterturbo rev-parse HEAD
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt
+
+      - name: Preparar el motor
+        run: ./scripts/setup_mpt.sh
+
+      - name: Ejecutar una corrida completa
+        id: corrida
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          .venv/bin/python -m app run --run-id "$RUN_ID"
+
+      - name: Revalidar los artefactos de la corrida
+        run: .venv/bin/python -m app validate "${{ steps.corrida.outputs.run_id }}"
+
+      - name: Comprobar que reanudar omite las etapas ya hechas
+        run: |
+          .venv/bin/python -m app run --run-id "${{ steps.corrida.outputs.run_id }}" 2>&1 | tee /tmp/reanudacion.log
+          grep -q "stage=prepare_input event=skip" /tmp/reanudacion.log
+          grep -q "stage=render event=skip" /tmp/reanudacion.log
+
+      - name: Publicar artefactos de la corrida
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-1-run
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runs/*/manifest.json
+            runs/*/render_job.json
+            runs/*/render_result.json
+            runs/*/render/final.mp4
