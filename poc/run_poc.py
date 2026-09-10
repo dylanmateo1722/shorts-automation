@@ -81,9 +81,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Proof of Concept de Gate 0.5")
     parser.add_argument("--out-dir", default="runs/poc", help="directorio de la corrida")
     parser.add_argument("--voice", default=tts_es.VOZ_POR_DEFECTO, help="voz de Edge TTS")
-    parser.add_argument("--run-id", default=None, help="identificador de la corrida")
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="UUID de la corrida; se genera uno si se omite",
+    )
     args = parser.parse_args(argv)
 
+    # El run_id es también el --task-id de MPT (contrato D12), y MPT exige que
+    # sea un UUID válido. Se valida aquí para fallar en el primer segundo y no
+    # a mitad del render.
+    if args.run_id:
+        try:
+            uuid.UUID(args.run_id)
+        except ValueError:
+            parser.error(
+                f"--run-id debe ser un UUID válido (MPT lo exige como --task-id); "
+                f"recibido {args.run_id!r}"
+            )
     run_id = args.run_id or str(uuid.uuid4())
     salida = Path(args.out_dir).resolve()
     salida.mkdir(parents=True, exist_ok=True)

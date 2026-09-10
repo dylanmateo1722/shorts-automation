@@ -59,7 +59,15 @@ jobs:
         run: .venv/bin/python -m pytest tests/ -q
 
       - name: Ejecutar el PoC de extremo a extremo
-        run: .venv/bin/python -m poc.run_poc --out-dir runs/poc --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+        env:
+          # MoneyPrinterTurbo exige que --task-id sea un UUID, y nuestro run_id
+          # es ese mismo valor (contrato D12). Se deriva uno determinista de la
+          # corrida de CI para que el artefacto siga siendo trazable.
+          CI_RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import os,uuid;print(uuid.uuid5(uuid.NAMESPACE_URL, os.environ['CI_RUN_KEY']))")
+          echo "run_id de la corrida: $RUN_ID"
+          .venv/bin/python -m poc.run_poc --out-dir runs/poc --run-id "$RUN_ID"
 
       - name: Espacio en disco tras la corrida
         if: always()
