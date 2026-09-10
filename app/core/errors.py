@@ -131,6 +131,24 @@ class LicenciaDenegada(ErrorPermanente):
     """La fuente no puede usarse. No es un fallo: es una decisión."""
 
 
+class ProcedenciaInvalida(ErrorPermanente):
+    """Se intentó usar en el render un recurso que no lo permite.
+
+    Caso principal: un recurso marcado ``reference_only``. Informó el tema o el
+    análisis, pero su material no puede aparecer en la pieza, y convertirlo en
+    asset de render no es un descuido recuperable sino una decisión que nadie
+    tomó.
+    """
+
+
+class TransformacionIncompleta(ErrorPermanente):
+    """Falta algún elemento editorial propio obligatorio.
+
+    No es un aviso: una corrida sin todos sus elementos registrados no puede
+    declararse lista para el render, porque no hay evidencia de qué es propio.
+    """
+
+
 class QAFallido(ErrorPermanente):
     """El resultado no pasó los controles técnicos."""
 

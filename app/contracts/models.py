@@ -37,6 +37,11 @@ SCHEMA_VERSION = "1"
 # anteriores, que ya están persistidos con "1".
 SCHEMA_VERSION_VOZ = "1.0"
 
+# Los artefactos de transformación y QA llevan la suya. Cada familia se versiona
+# por separado a propósito: que evolucione el contrato de subtítulos no debería
+# obligar a reescribir el de procedencia.
+SCHEMA_VERSION_TRANSFORMACION = "1.0"
+
 # Reglas de legibilidad del subtítulo, fijadas por el contrato. Son una
 # heurística inicial —no una garantía de que ningún cue pase de 32 caracteres—
 # y cambiarlas es evolucionar el schema, no reconfigurar una corrida.
@@ -123,13 +128,18 @@ class ProcedenciaIA(BaseModel):
 
 
 class ClaseFuente(str, Enum):
-    """Qué se puede hacer con una fuente.
+    """Qué se puede hacer con un recurso.
 
     ``reference_only`` informa el tema y el análisis, pero su material no
-    puede aparecer en el render. La distinción se aplica por contrato.
+    puede aparecer en el render. ``render_allowed`` sí puede, porque existe una
+    base de procedencia registrada.
+
+    La distinción se aplica por contrato, no por convención de nombres de
+    archivo: ver ``ProvenanceLedger``, que se niega a validar si un recurso de
+    referencia aparece entre los utilizables para el render.
     """
 
-    autorizada = "authorized"
+    render_permitido = "render_allowed"
     solo_referencia = "reference_only"
 
 
@@ -337,6 +347,12 @@ class ArtefactoVoz(Artefacto):
     schema_version: str = SCHEMA_VERSION_VOZ
 
 
+class ArtefactoTransformacion(Artefacto):
+    """Base de los artefactos de procedencia, transformación y QA."""
+
+    schema_version: str = SCHEMA_VERSION_TRANSFORMACION
+
+
 class VoiceAsset(ArtefactoVoz):
     """Narración sintetizada por el proveedor de TTS.
 
@@ -514,6 +530,72 @@ class SubtitleAsset(ArtefactoVoz):
         return self
 
 
+class AssetProvenance(BaseModel):
+    """De dónde viene un recurso y qué se puede hacer con él.
+
+    ``evidence_ref`` no se valida legalmente aquí: es el puntero a la evidencia
+    —un recibo de stock, una URL de licencia, "generado por el pipeline"— que
+    una persona podrá auditar. Registrarlo no equivale a haber verificado la
+    licencia.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_path: RutaRelativa
+    source_class: ClaseFuente
+    basis: BaseLicencia
+    evidence_ref: TextoNoVacio
+    description: TextoNoVacio
+
+
+class ProvenanceLedger(ArtefactoTransformacion):
+    """Qué recursos tiene la corrida y cuáles puede tocar el render.
+
+    ``render_assets`` no es informativo: el contrato **se niega a validar** si
+    contiene un recurso que ``assets`` declara ``reference_only``, o uno que no
+    declara en absoluto. Es la forma estructural de la restricción; no depende
+    de que ninguna etapa se acuerde de comprobarla ni de cómo se llame el
+    archivo.
+    """
+
+    assets: list[AssetProvenance] = Field(default_factory=list)
+    render_assets: list[RutaRelativa] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _comprobar_procedencia(self) -> "ProvenanceLedger":
+        por_ruta: dict[str, AssetProvenance] = {}
+        for asset in self.assets:
+            if asset.asset_path in por_ruta:
+                raise ValueError(f"recurso declarado dos veces: {asset.asset_path!r}")
+            por_ruta[asset.asset_path] = asset
+
+        for ruta in self.render_assets:
+            declarado = por_ruta.get(ruta)
+            if declarado is None:
+                raise ValueError(
+                    f"el recurso {ruta!r} se usaría en el render sin procedencia "
+                    f"declarada"
+                )
+            if declarado.source_class is not ClaseFuente.render_permitido:
+                raise ValueError(
+                    f"el recurso {ruta!r} está clasificado "
+                    f"{declarado.source_class.value!r} y no puede usarse en el "
+                    f"render"
+                )
+        return self
+
+    def clase(self, ruta: str) -> ClaseFuente | None:
+        """Clase declarada de un recurso, o None si no está en el ledger."""
+        for asset in self.assets:
+            if asset.asset_path == ruta:
+                return asset.source_class
+        return None
+
+    def permite_render(self, ruta: str) -> bool:
+        """True solo si el recurso está declarado y es utilizable en el render."""
+        return self.clase(ruta) is ClaseFuente.render_permitido
+
+
 class TipoTransformacion(str, Enum):
     narracion_propia = "own_narration"
     guion_reestructurado = "restructured_script"
@@ -522,19 +604,91 @@ class TipoTransformacion(str, Enum):
     overlay_visual = "visual_overlay"
 
 
+#: Los cinco elementos que toda corrida válida debe registrar.
+TRANSFORMACIONES_OBLIGATORIAS = frozenset(TipoTransformacion)
+
+
+class EstadoValidacion(str, Enum):
+    validado = "validated"
+    pendiente = "pending"
+    invalido = "invalid"
+
+
 class TransformationElement(BaseModel):
     """Un elemento editorial propio incorporado a la pieza.
 
-    Registrarlo NO implica que el resultado sea jurídicamente transformativo
-    ni monetizable: ese juicio es humano y vive en ``QAResult``.
+    Registrarlo NO implica que el resultado sea jurídicamente transformativo,
+    suficientemente original ni monetizable: ese juicio es humano y vive en
+    ``QAResult.editorial_legal_assessment``.
+
+    ``asset_ref`` es obligatorio a propósito. Un elemento sin recurso al que
+    apuntar sería indistinguible de declarar ``transformation = true``, que no
+    es evidencia de nada.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     kind: TipoTransformacion
-    rationale: str
-    duration_s: float | None = None
-    asset_ref: str | None = None
+    rationale: TextoNoVacio
+    asset_ref: RutaRelativa
+    validation_status: EstadoValidacion = EstadoValidacion.pendiente
+
+
+class TransformationSet(ArtefactoTransformacion):
+    """Los elementos editoriales propios de una corrida.
+
+    No exige los cinco aquí: que falte uno es un hallazgo que la QA técnica
+    debe poder **reportar**, y un contrato que lo impidiera haría imposible
+    persistir el estado incompleto para inspeccionarlo.
+    """
+
+    elements: list[TransformationElement] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sin_duplicados(self) -> "TransformationSet":
+        vistos: set[TipoTransformacion] = set()
+        for elemento in self.elements:
+            if elemento.kind in vistos:
+                raise ValueError(
+                    f"elemento de transformación duplicado: {elemento.kind.value!r}"
+                )
+            vistos.add(elemento.kind)
+        return self
+
+    @property
+    def tipos(self) -> set[TipoTransformacion]:
+        return {e.kind for e in self.elements}
+
+    @property
+    def faltantes(self) -> set[TipoTransformacion]:
+        return set(TRANSFORMACIONES_OBLIGATORIAS) - self.tipos
+
+
+class OverlaySpec(ArtefactoTransformacion):
+    """El overlay propio del pipeline y sus parámetros de composición.
+
+    Gate 4 genera el archivo; **no** lo compone sobre el vídeo. La composición
+    es de Gate 5, que leerá estos parámetros en lugar de volver a decidirlos.
+
+    El texto sale del guion propio de la corrida, nunca de un recurso de
+    referencia: eso lo hace original del pipeline.
+    """
+
+    overlay_path: RutaRelativa
+    overlay_format: str = Field(min_length=1)
+    text: TextoNoVacio
+    start_seconds: float = Field(ge=0)
+    end_seconds: float
+    source_text_reference: RutaRelativa
+
+    @model_validator(mode="after")
+    def _comprobar_tiempos(self) -> "OverlaySpec":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError(
+                f"el overlay termina en {self.end_seconds}s, que no es posterior "
+                f"a su inicio en {self.start_seconds}s"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -603,27 +757,140 @@ class RenderResult(Artefacto):
 # ---------------------------------------------------------------------------
 
 
+class NivelQA(str, Enum):
+    """Qué implica que una comprobación falle.
+
+    Un ``warning`` que falla es información, no un veredicto: ascenderlo a error
+    sin una razón técnica convertiría una heurística de legibilidad en un
+    bloqueo.
+    """
+
+    error = "error"
+    aviso = "warning"
+
+
 class ComprobacionQA(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str = Field(min_length=1)
     ok: bool
     detail: str
+    level: NivelQA = NivelQA.error
 
 
-class QAResult(Artefacto):
-    """Informe de QA con las dos capas explícitamente separadas."""
+class EstadoQA(str, Enum):
+    aprobado = "pass"
+    aprobado_con_avisos = "pass_with_warnings"
+    reprobado = "fail"
 
+
+class EstadoEvaluacion(str, Enum):
+    """Estado del juicio editorial y legal.
+
+    Solo ``not_assessed`` lo pone el pipeline. Los otros dos existen para que
+    una persona pueda registrar su decisión; **ninguna** comprobación
+    automática los establece.
+    """
+
+    no_evaluado = "NOT_ASSESSED"
+    aprobado_por_humano = "APPROVED_BY_HUMAN"
+    rechazado_por_humano = "REJECTED_BY_HUMAN"
+
+
+NOTA_EDITORIAL = (
+    "La presencia de elementos de transformación NO implica que el resultado sea "
+    "jurídicamente transformativo, suficientemente original ni monetizable. Este "
+    "juicio es editorial y legal, requiere revisión humana y no se automatiza."
+)
+
+
+class EvaluacionEditorialLegal(BaseModel):
+    """El juicio que **no** se automatiza. Se declara, no se calcula.
+
+    ``automated_similarity_threshold_applied`` es estructuralmente falso: el
+    contrato rechaza el valor contrario. No existe puntuación de similitud ni
+    umbral de diferencia en este proyecto, y el campo está aquí para que eso
+    quede afirmado en cada artefacto en lugar de solo en la documentación.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: EstadoEvaluacion = EstadoEvaluacion.no_evaluado
+    automated_similarity_threshold_applied: Literal[False] = False
+    note: str = NOTA_EDITORIAL
+    assessed_by: str | None = None
+
+
+class QAResult(ArtefactoTransformacion):
+    """Informe de QA con las dos capas explícitamente separadas.
+
+    ``technical_qa_ok`` y ``editorial_legal_assessment`` son independientes: la
+    QA técnica puede estar en verde mientras el juicio editorial sigue sin
+    evaluar, y eso es el estado normal de una corrida. Mezclarlos haría creer
+    que un artefacto válido es un artefacto publicable.
+
+    ``errors`` y ``warnings`` se derivan de ``checks`` en lugar de persistirse
+    aparte: dos listas que pueden discrepar de su origen acaban discrepando.
+    """
+
+    status: EstadoQA
     technical_qa_ok: bool
-    checks: list[ComprobacionQA]
-    transformation_elements: list[TransformationElement] = Field(default_factory=list)
-    # El juicio editorial y legal no se automatiza. Se declara, no se calcula.
-    editorial_legal_assessment: dict = Field(
-        default_factory=lambda: {
-            "status": "NOT_ASSESSED",
-            "automated_similarity_threshold_applied": False,
-        }
+    checks: list[ComprobacionQA] = Field(default_factory=list)
+    # Los elementos viven en TransformationSet; aquí solo se referencian, para
+    # no tener dos copias de la misma verdad.
+    transformation_artifact: RutaRelativa
+    provenance_artifact: RutaRelativa
+    editorial_legal_assessment: EvaluacionEditorialLegal = Field(
+        default_factory=EvaluacionEditorialLegal
     )
+    # Si Gate 5 puede consumir esta corrida. Es una afirmación técnica: no dice
+    # nada sobre si la pieza debe publicarse.
+    ready_for_render: bool = False
+
+    @model_validator(mode="after")
+    def _comprobar_coherencia(self) -> "QAResult":
+        fallos = [c for c in self.checks if not c.ok and c.level is NivelQA.error]
+        avisos = [c for c in self.checks if not c.ok and c.level is NivelQA.aviso]
+
+        esperado = (
+            EstadoQA.reprobado
+            if fallos
+            else (EstadoQA.aprobado_con_avisos if avisos else EstadoQA.aprobado)
+        )
+        if self.status is not esperado:
+            raise ValueError(
+                f"el estado declarado es {self.status.value!r} y las "
+                f"comprobaciones dan {esperado.value!r} "
+                f"({len(fallos)} error(es), {len(avisos)} aviso(s))"
+            )
+        if self.technical_qa_ok != (not fallos):
+            raise ValueError(
+                f"technical_qa_ok es {self.technical_qa_ok} con {len(fallos)} "
+                f"comprobación(es) de nivel error sin pasar"
+            )
+        if self.ready_for_render and fallos:
+            raise ValueError(
+                "no se puede declarar la corrida lista para el render con "
+                f"{len(fallos)} error(es) de QA"
+            )
+        return self
+
+    @property
+    def errors(self) -> list[ComprobacionQA]:
+        return [c for c in self.checks if not c.ok and c.level is NivelQA.error]
+
+    @property
+    def warnings(self) -> list[ComprobacionQA]:
+        return [c for c in self.checks if not c.ok and c.level is NivelQA.aviso]
+
+    def resumen(self) -> str:
+        etiqueta = {
+            (True, NivelQA.error): "OK   ", (False, NivelQA.error): "FALLA",
+            (True, NivelQA.aviso): "OK   ", (False, NivelQA.aviso): "AVISO",
+        }
+        return "\n".join(
+            f"  [{etiqueta[(c.ok, c.level)]}] {c.name}: {c.detail}" for c in self.checks
+        )
 
 
 class PublishMetadata(Artefacto):

@@ -15,13 +15,14 @@ configuración ni historial con ese repositorio.
 | Gate 0.5 | Proof of Concept del pipeline de render | Aprobado |
 | Gate 1 | Contratos, run/manifest, adaptador y pipeline mínimo | Aprobado |
 | Gate 2 | Traducción y adaptación editorial al español | Aprobado |
-| **Gate 3** | **TTS, WordBoundaries y subtítulos (SRT + ASS)** | **En verificación** |
-| Gate 4+ | Transformación visual, composición, QA, Discovery, publicación | No iniciado |
+| Gate 3 | TTS, WordBoundaries y subtítulos (SRT + ASS) | Aprobado |
+| **Gate 4** | **Procedencia, transformación editorial y QA técnica** | **En verificación** |
+| Gate 5+ | Composición y render final, Discovery, publicación | No iniciado |
 
 Lo que hoy existe es la columna vertebral técnica, la capa lingüística, la de
-voz y subtítulos, y el PoC de Gate 0.5. **No hay** transformación visual, ni
-composición final, ni Discovery, ni análisis de competencia, ni integración con
-YouTube, ni publicación.
+voz y subtítulos, la de transformación con su QA técnica, y el PoC de Gate 0.5.
+**No hay** composición final, ni render del producto, ni Discovery, ni análisis
+de competencia, ni integración con YouTube, ni publicación.
 
 ## Arquitectura actual
 
@@ -53,6 +54,9 @@ Cuatro reglas que el código impone, no solo documenta:
   de lenguaje definitivo sigue pendiente de una evaluación comparativa.
 - **La duración del audio se mide sobre el archivo.** Nunca se deriva de la
   estimación del guion ni del último tiempo que reporte el TTS.
+- **Un recurso de referencia no puede acabar en el render.** No es una
+  convención de nombres: el contrato de procedencia se niega a validar si uno
+  aparece entre los utilizables.
 
 ## Instalación
 
@@ -325,6 +329,148 @@ vuelven a generar. Se rehacen cuando cambia algo que afecta al resultado:
 Ritmo y tono no caben en el contrato del artefacto —mantenerlo pequeño es
 deliberado—, así que su huella vive en la metadata de la etapa.
 
+## Procedencia, transformación y QA técnica
+
+```
+SubtitleAsset ─→ overlay ─→ procedencia ─→ transformación ─→ QA técnica
+                    │            │               │                │
+              OverlaySpec  ProvenanceLedger  TransformationSet  QAResult
+```
+
+### REFERENCE_ONLY y RENDER_ALLOWED
+
+Todo recurso de una corrida se declara en una de dos clases, y la diferencia es
+la frontera que más importa en este proyecto:
+
+| | `reference_only` | `render_allowed` |
+|---|---|---|
+| Para qué sirve | referencia temática, investigación, análisis, inspiración editorial | material que puede aparecer en la pieza |
+| Puede existir en la corrida | sí | sí |
+| Puede informar el guion | sí | sí |
+| Puede usarse en el render | **no** | sí |
+| Base de procedencia | ninguna declarada | propia, stock, Creative Commons, dominio público o permiso documentado |
+
+**La restricción es estructural, no una convención.** `ProvenanceLedger` lleva
+dos listas: los recursos declarados y los que el render puede usar, y el
+contrato **se niega a validar** si la segunda contiene uno clasificado
+`reference_only` o uno que no esté declarado. Un archivo llamado
+`narration_propia_original.mp3` sigue bloqueado si su procedencia dice que es
+de referencia; hay un test que lo comprueba exactamente así. No hay promoción
+automática de una clase a la otra: hay que cambiar la clase declarada.
+
+Declarar un recurso de referencia en una corrida:
+
+```bash
+.venv/bin/python -m app run --pipeline transformation \
+  --reference-asset reference/fuente.txt  ...
+```
+
+Queda registrado con su clase, aparece como aviso en la QA y **no** entra en
+`render_assets`.
+
+Gate 4 **no resuelve la cuestión legal de las licencias**. Registra de dónde
+viene cada recurso y a qué evidencia apuntar, y bloquea técnicamente lo que no
+está autorizado. Que `basis = stock` esté escrito no significa que alguien haya
+verificado esa licencia.
+
+### Qué significa transformación editorial
+
+Cada corrida válida registra cinco elementos propios, cada uno apuntando a un
+recurso que existe:
+
+| Elemento | A qué apunta |
+|---|---|
+| `own_narration` | el MP3 que sintetizó Gate 3 |
+| `restructured_script` | el `adapted_script.json` de Gate 2 |
+| `added_context` | las notas de transformación de la adaptación |
+| `own_subtitles` | el SRT propio de Gate 3 |
+| `visual_overlay` | el rótulo ASS que genera Gate 4 |
+
+Nada se duplica: la narración no se vuelve a sintetizar, no hay un segundo
+sistema de subtítulos y no se crea otra copia del guion. Gate 4 **referencia**
+lo que los Gates anteriores produjeron.
+
+`asset_ref` es obligatorio a propósito. Un elemento sin recurso al que apuntar
+sería indistinguible de declarar `transformation = true`, que no es evidencia de
+nada.
+
+El `added_context` sale de las notas que la adaptación ya registró. Si no hay
+ninguna, se declara la **ausencia justificada** en lugar de generar un dato
+factual para rellenar el campo: siguen valiendo las reglas de fidelidad de Gate
+2 —no inventar hechos, nombres, cifras ni citas, y no aumentar artificialmente
+la certeza—.
+
+El overlay es el único recurso visual que aporta Gate 4: un rótulo con el
+gancho del guion propio, en ASS porque el FFmpeg empaquetado no trae el filtro
+`drawtext` pero sí libass. Gate 4 **genera el archivo y sus parámetros de
+composición**; componerlo sobre vídeo es de Gate 5.
+
+### Qué comprueba la QA técnica
+
+Propiedades medibles y deterministas de lo que hay en disco. Unos 60 checks por
+corrida, cada uno con nombre y nivel propios:
+
+- **run** — el directorio existe y lleva el `run_id`.
+- **AdaptedScript** — contrato válido, texto no vacío, duraciones objetivo y
+  estimada positivas.
+- **VoiceAsset** — contrato válido, ruta relativa, el MP3 existe, duración > 0,
+  huella del guion coincidente, proveedor y voz registrados, y **la duración
+  registrada se vuelve a medir contra el archivo**.
+- **WordBoundaryAsset** — índices únicos, tiempos ordenados y no negativos,
+  dentro del audio, mismo audio que el `VoiceAsset`, huella coincidente.
+- **SubtitleAsset** — SRT y ASS existen, cues válidos, sin solapamientos,
+  índices desde 1 y crecientes, máximo 2 líneas, apunta al artefacto de tiempos
+  correcto, huella coincidente.
+- **duraciones** — los subtítulos usan la duración **real** del audio, y la
+  estimación de Gate 2 se compara solo para medir la desviación.
+- **overlay**, **procedencia** y **transformación** — archivo presente, cada
+  recurso declarado, ningún elemento apoyado en material de referencia, los
+  cinco elementos registrados.
+
+**Qué NO comprueba.** Nada sobre valor editorial, originalidad suficiente,
+cumplimiento de derechos de autor ni monetizabilidad. No existe puntuación de
+similitud, ni porcentaje de transformación, ni umbral alguno destinado a decidir
+si un contenido pasa un sistema de detección de copyright, y esos campos no
+caben en los contratos.
+
+### QA técnica y juicio editorial son cosas distintas
+
+```
+technical_qa_ok: true          ← los artefactos son consistentes
+editorial_legal_assessment:
+    status: NOT_ASSESSED       ← nadie ha juzgado la pieza
+```
+
+Ese es el estado **normal** de una corrida correcta, y los dos campos no se
+mezclan nunca. `technical_qa_ok` en verde significa que Gate 5 puede consumir
+los artefactos; no significa que la pieza deba publicarse. El único estado que
+pone el pipeline es `NOT_ASSESSED`: los otros dos existen para que una persona
+registre su decisión, y `automated_similarity_threshold_applied` es
+estructuralmente `false` —el contrato rechaza el valor contrario—.
+
+### Errores y avisos
+
+Un **error** invalida la corrida para Gate 5: contrato roto, UUID inválido, ruta
+absoluta, archivo ausente, huella que no cuadra, subtítulos solapados, recurso
+de referencia en el render, elemento obligatorio ausente, referencia inválida.
+
+Un **aviso** no bloquea: una línea de subtítulo por encima de los 32 caracteres,
+una divergencia moderada entre la duración estimada y la real, la cola de audio
+tras el último `WordBoundary`, un recurso de referencia registrado. Ascender un
+aviso a error sin razón técnica convertiría una heurística en un veredicto.
+
+`status` resume las dos capas: `pass`, `pass_with_warnings` o `fail`. El
+contrato comprueba que cuadre con las comprobaciones, así que un informe no
+puede declararse aprobado mientras tenga errores.
+
+### Qué queda pendiente para Gate 5
+
+La composición final: quemar los subtítulos y el overlay sobre el material
+visual, invocar el motor de render, y el QA del MP4 resultante —resolución,
+fps, volumen, duración—, que es lo que ya prueba el PoC de Gate 0.5 pero todavía
+no está integrado en el pipeline. La duración de referencia para ese vídeo sigue
+siendo `VoiceAsset.audio_duration_seconds`.
+
 ## Ejecutar una corrida
 
 ```bash
@@ -341,7 +487,7 @@ deliberado—, así que su huella vive en la metadata de la etapa.
 .venv/bin/python -m app validate <UUID>
 ```
 
-Hay tres secuencias:
+Hay cuatro secuencias:
 
 - `--pipeline render` (por defecto) — el pipeline de Gate 1: `prepare_input`
   genera una entrada controlada con FFmpeg y `render` invoca el motor. Sirve
@@ -351,6 +497,8 @@ Hay tres secuencias:
 - `--pipeline voice` — el de Gate 3: encadena las etapas lingüísticas y añade
   `voice` y `subtitles`. La voz no se ejecuta sola, porque necesita un guion
   adaptado, y encadenarlas mantiene un solo `run_id` para todos los artefactos.
+- `--pipeline transformation` — el de Gate 4: lo anterior más `overlay`,
+  `provenance`, `transformation` y `technical_qa`. Nueve etapas en total.
 
 ### Una corrida completa con el fixture incluido
 
@@ -397,6 +545,14 @@ runs/<run_id>/
 │   ├── subtitles.srt     formato canónico
 │   └── subtitles.ass     presentación para el burn-in
 │
+│   pipeline transformation
+├── overlay_spec.json     rótulo propio y sus parámetros de composición
+├── overlay/
+│   └── overlay.ass       el rótulo
+├── provenance_ledger.json  de dónde viene cada recurso y cuál puede renderizarse
+├── transformation_set.json los cinco elementos editoriales propios
+├── qa_result.json        informe de QA técnica, con el juicio editorial aparte
+│
 │   pipeline render
 ├── render_job.json
 ├── render_result.json
@@ -432,7 +588,9 @@ reexportan, así que el PoC sigue ejecutándose exactamente como se aprobó.
 
 Este código no descarga contenido de terceros, no publica en ninguna
 plataforma y no implementa ningún mecanismo destinado a eludir Content ID ni
-sistemas de detección de copyright.
+sistemas de detección de copyright. Tampoco hay puntuación de similitud,
+porcentaje de transformación ni umbral de diferencia: esos campos no existen en
+los contratos y su ausencia está cubierta por tests.
 
 El QA técnico está separado del juicio editorial y legal, que **no se
 automatiza**: que los elementos de transformación estén registrados no implica
@@ -466,5 +624,15 @@ puntúan la calidad editorial, que sigue siendo un juicio humano.
 - El `config` del manifest se escribe cuando se crea la corrida y no se
   reescribe al reanudarla: si se cambia la voz a mitad, la voz efectiva está en
   la metadata de la etapa `voice`, que es el registro autoritativo.
+- **La procedencia se registra, no se verifica.** Que un recurso declare
+  `basis = stock` o `creative_commons` no significa que nadie haya comprobado
+  esa licencia: el campo apunta a una evidencia que una persona debe auditar.
+  Lo que sí es técnico y sí se aplica es el bloqueo de `reference_only`.
+- Los recursos de referencia **se declaran**, no se descubren. El pipeline no
+  busca ni descarga nada: alguien afirma "esto lo consulté" y a partir de ahí
+  queda bloqueado para el render.
+- La QA técnica recorre los artefactos de una corrida, no el vídeo final. El QA
+  del MP4 —resolución, fps, volumen, duración— existe en el PoC de Gate 0.5 y
+  todavía no está integrado en el pipeline: es trabajo de Gate 5.
 - No hay política de reintentos por etapa: solo el contrato de errores que la
   distingue transitorio, permanente e infraestructura.

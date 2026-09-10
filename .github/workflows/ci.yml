@@ -4,7 +4,9 @@
 #
 #   tests        rápido y sin servicios externos: motor falso que respeta el
 #                contrato del CLI de MoneyPrinterTurbo, LLM falso y TTS falso.
-#                Es el que decide si el código está bien.
+#                Es el que decide si el código está bien, y el que demuestra
+#                desde un checkout limpio que la cadena entera funciona y que un
+#                recurso de referencia queda bloqueado para el render.
 #   integration  lento y con el motor real: comprueba que el adaptador funciona
 #                contra MoneyPrinterTurbo de verdad en un runner.
 #   tts-real     aislado y contra el Edge TTS real. Está separado a propósito:
@@ -24,6 +26,7 @@ on:
       - claude/gate-1-core
       - claude/gate-2-linguistic
       - claude/gate-3-tts-subtitles
+      - claude/gate-4-transformation-qa
   pull_request:
 
 permissions:
@@ -115,11 +118,89 @@ jobs:
           grep -q "stage=voice event=skip" /tmp/reanudacion-voz.log
           grep -q "stage=subtitles event=skip" /tmp/reanudacion-voz.log
 
-      - name: Publicar artefactos lingüísticos y de voz
+      # Transformación editorial y QA técnica. Comprueba lo que ninguna prueba
+      # unitaria puede comprobar: que desde un checkout limpio la cadena entera
+      # produce artefactos coherentes y que un recurso declarado solo como
+      # referencia queda bloqueado para el render de verdad.
+      - name: Transformación y QA técnica
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+
+          # Un recurso consultado solo como referencia, dentro de la corrida.
+          mkdir -p "runs/$RUN_ID/reference"
+          echo "material consultado como referencia" > "runs/$RUN_ID/reference/fuente.txt"
+
+          .venv/bin/python -m app run \
+            --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g4.log
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline transformation
+
+          # Los cuatro artefactos lógicos y el overlay propio.
+          test -s "runs/$RUN_ID/overlay_spec.json"
+          test -s "runs/$RUN_ID/provenance_ledger.json"
+          test -s "runs/$RUN_ID/transformation_set.json"
+          test -s "runs/$RUN_ID/qa_result.json"
+          test -s "runs/$RUN_ID/overlay/overlay.ass"
+
+          # QA técnica en verde y juicio editorial explícitamente sin evaluar.
+          grep -q "stage=technical_qa event=evaluated" /tmp/g4.log
+          grep -q "editorial_legal=NOT_ASSESSED" /tmp/g4.log
+
+          # El recurso de referencia está registrado y fuera del render.
+          grep -q "stage=provenance event=reference_only asset=reference/fuente.txt" /tmp/g4.log
+          .venv/bin/python - "$RUN_ID" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          raiz = Path("runs") / sys.argv[1]
+          ledger = json.loads((raiz / "provenance_ledger.json").read_text(encoding="utf-8"))
+          informe = json.loads((raiz / "qa_result.json").read_text(encoding="utf-8"))
+          conjunto = json.loads((raiz / "transformation_set.json").read_text(encoding="utf-8"))
+
+          referencia = "reference/fuente.txt"
+          clases = {a["asset_path"]: a["source_class"] for a in ledger["assets"]}
+          assert clases[referencia] == "reference_only", clases
+          assert referencia not in ledger["render_assets"], ledger["render_assets"]
+          assert all(e["asset_ref"] != referencia for e in conjunto["elements"])
+
+          assert informe["technical_qa_ok"] is True, informe["status"]
+          assert informe["ready_for_render"] is True
+          assert informe["editorial_legal_assessment"]["status"] == "NOT_ASSESSED"
+          assert informe["editorial_legal_assessment"]["automated_similarity_threshold_applied"] is False
+          tipos = {e["kind"] for e in conjunto["elements"]}
+          assert tipos == {
+              "own_narration", "restructured_script", "added_context",
+              "own_subtitles", "visual_overlay",
+          }, tipos
+          print(
+              f"QA {informe['status']}: {len(informe['checks'])} checks, "
+              f"{len(tipos)} elementos, {referencia} bloqueado para el render"
+          )
+          PY
+
+          # Reanudar no debe rehacer nada.
+          .venv/bin/python -m app run --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g4-reanudacion.log
+          for ETAPA in overlay provenance transformation technical_qa; do
+            grep -q "stage=$ETAPA event=skip" /tmp/g4-reanudacion.log
+          done
+
+      - name: Publicar artefactos de voz, transformación y QA
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-3-voice
+          name: gate-4-transformation-qa
           if-no-files-found: warn
           retention-days: 14
           path: |
@@ -132,6 +213,11 @@ jobs:
             runs/*/subtitle_asset.json
             runs/*/subtitles/subtitles.srt
             runs/*/subtitles/subtitles.ass
+            runs/*/overlay_spec.json
+            runs/*/overlay/overlay.ass
+            runs/*/provenance_ledger.json
+            runs/*/transformation_set.json
+            runs/*/qa_result.json
 
   integration:
     name: Integración con el motor real

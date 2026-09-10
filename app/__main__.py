@@ -1,7 +1,8 @@
 """CLI del orquestador.
 
-    python -m app run [--pipeline render|linguistic|voice] [--run-id UUID] [--force STAGE]
-    python -m app validate <run-id> [--pipeline render|linguistic|voice]
+    python -m app run [--pipeline render|linguistic|voice|transformation]
+                      [--run-id UUID] [--force STAGE] [--reference-asset RUTA]
+    python -m app validate <run-id> [--pipeline render|linguistic|voice|transformation]
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -20,6 +21,8 @@ from app.core.logging import configurar_logging
 from app.core.run_id import nuevo_run_id, parsear_run_id
 from app.pipeline.core import construir_pipeline, ejecutar_run, validar_run
 from app.pipeline.linguistic import construir_pipeline_linguistico
+from app.pipeline.qa import construir_pipeline_transformacion
+from app.pipeline.transformation import CLAVE_REFERENCIAS
 from app.pipeline.voice import construir_pipeline_voz
 
 
@@ -33,10 +36,16 @@ def _pipeline_voz() -> list:
     return construir_pipeline_linguistico() + construir_pipeline_voz()
 
 
+def _pipeline_transformacion() -> list:
+    """… → SubtitleAsset → overlay → procedencia → transformación → QA técnica."""
+    return _pipeline_voz() + construir_pipeline_transformacion()
+
+
 PIPELINES = {
     "render": construir_pipeline,
     "linguistic": construir_pipeline_linguistico,
     "voice": _pipeline_voz,
+    "transformation": _pipeline_transformacion,
 }
 
 
@@ -63,6 +72,12 @@ def _construir_parser() -> argparse.ArgumentParser:
         "--run-id",
         default=None,
         help="UUID de la corrida; se genera uno si se omite. Reanuda si ya existe",
+    )
+    ejecutar.add_argument(
+        "--reference-asset", action="append", default=None, metavar="RUTA",
+        help="recurso consultado SOLO como referencia, relativo al directorio de "
+             "la corrida. Se registra en la procedencia y queda bloqueado para "
+             "el render. Se puede repetir",
     )
     ejecutar.add_argument(
         "--force", default=None, metavar="ETAPA",
@@ -96,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
                 parametros["transcript_path"] = args.transcript
             if args.target_duration is not None:
                 parametros["target_duration_seconds"] = args.target_duration
+            if args.reference_asset:
+                parametros[CLAVE_REFERENCIAS] = args.reference_asset
             resultado = ejecutar_run(
                 run_id, settings, forzar=args.force,
                 parametros=parametros, etapas=etapas,
