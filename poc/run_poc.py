@@ -21,7 +21,12 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import burn_in, evidence, mpt_render, qa, segmenter, srt, tts_es
+from app.adapters.mpt import MPTAdapter
+from app.config.settings import Settings
+from app.contracts.models import EstadoRender, RenderJob
+from app.core.workspace import Workspace
+
+from . import burn_in, evidence, qa, segmenter, srt, tts_es
 
 RAIZ = Path(__file__).resolve().parent.parent
 RAIZ_MPT = RAIZ / "vendor" / "moneyprinterturbo"
@@ -161,29 +166,33 @@ def main(argv: list[str] | None = None) -> int:
             reg["materiales"] = [m.name for m in materiales]
 
         # --- Etapa 4: render con MoneyPrinterTurbo ------------------------
+        # El render pasa por el adaptador único de app/adapters: ningún otro
+        # módulo del repositorio invoca MoneyPrinterTurbo directamente.
         with ev.etapa("render_mpt") as reg:
             _log("-> Render con MoneyPrinterTurbo (CLI, audio externo, sin subtítulos)")
-            python_mpt = RAIZ_MPT / ".venv" / "bin" / "python"
-            if not python_mpt.exists():
-                raise RuntimeError(
-                    f"falta el entorno de MPT en {python_mpt}; ejecuta scripts/setup_mpt.sh"
-                )
-            render = mpt_render.renderizar(
-                raiz_mpt=RAIZ_MPT, python_mpt=python_mpt, guion=GUION_PRUEBA,
-                audio=res_tts.audio_path, materiales=materiales, task_id=run_id,
+            settings = Settings.desde_entorno()
+            ws = Workspace.en_directorio(salida, uuid.UUID(run_id))
+            job = RenderJob(
+                run_id=ws.run_id,
+                task_id=ws.run_id,
+                script=GUION_PRUEBA,
+                audio_path=ws.relativa(res_tts.audio_path),
+                materials=[ws.relativa(m) for m in materiales],
             )
-            if render.exit_code != 0:
+            render = MPTAdapter(settings, ws).render(job)
+            if render.status is EstadoRender.fallo:
                 raise RuntimeError(f"MPT exit={render.exit_code}: {render.error}")
             reg["exit_code"] = render.exit_code
-            reg["audio_duration_s"] = render.audio_duration_s
-        _log(f"   video de MPT: {render.video_path.name}")
-        ev.registrar_artefacto("mpt_final.mp4", render.video_path)
+            reg["audio_duration_s"] = render.duration_s
+        video_mpt = ws.ruta(render.output_path)
+        _log(f"   video de MPT: {render.output_path}")
+        ev.registrar_artefacto("mpt_final.mp4", video_mpt)
 
         # --- Etapa 5: burn-in de nuestros subtítulos ----------------------
         with ev.etapa("burn_in") as reg:
             _log("-> Quemando subtítulos propios con FFmpeg")
             final = burn_in.quemar(
-                entrada=render.video_path, ass=ruta_ass, salida=salida / "final.mp4"
+                entrada=video_mpt, ass=ruta_ass, salida=salida / "final.mp4"
             )
             reg["salida"] = final.name
         ev.registrar_artefacto("final.mp4", final)
