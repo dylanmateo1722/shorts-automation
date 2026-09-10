@@ -13,25 +13,84 @@ Dos reglas transversales:
   proveedor, modelo y versión de prompt, sin lo cual la salida no es
   reproducible ni auditable.
 
-Gate 1 define los catorce contratos pero solo produce ``RenderJob`` y
-``RenderResult``. Los demás existen para que las etapas futuras se comuniquen
+Gate 1 declaró los contratos por adelantado y solo producía ``RenderJob`` y
+``RenderResult``. Gate 2 implementó los lingüísticos y Gate 3 los de voz y
+subtítulos. Los que quedan existen para que las etapas futuras se comuniquen
 sin acoplamiento, no porque ya estén implementadas.
 """
 
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 SCHEMA_VERSION = "1"
+
+# Los artefactos de Gate 3 declaran su propia versión de schema. Se mantiene
+# separada de SCHEMA_VERSION para no reescribir la de los artefactos de Gates
+# anteriores, que ya están persistidos con "1".
+SCHEMA_VERSION_VOZ = "1.0"
+
+# Reglas de legibilidad del subtítulo, fijadas por el contrato. Son una
+# heurística inicial —no una garantía de que ningún cue pase de 32 caracteres—
+# y cambiarlas es evolucionar el schema, no reconfigurar una corrida.
+MAX_LINEAS_SUBTITULO = 2
+CARACTERES_OBJETIVO_LINEA = 32
 
 
 def _ahora() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# --- tipos transversales ---------------------------------------------------
+
+# Una ruta absoluta en un artefacto lo vuelve inútil en otra máquina. Se
+# rechazan las tres formas: POSIX (``/home/...``), UNC (``\\servidor``) y
+# unidad de Windows (``C:\...``).
+_ABSOLUTA = re.compile(r"^(?:/|\\\\|[A-Za-z]:)")
+
+
+def _exigir_relativa(valor: str) -> str:
+    if not valor.strip():
+        raise ValueError("la ruta no puede estar vacía")
+    if _ABSOLUTA.match(valor):
+        raise ValueError(
+            f"la ruta {valor!r} es absoluta; los artefactos guardan rutas "
+            f"relativas al directorio de la corrida"
+        )
+    return valor
+
+
+def _exigir_texto(valor: str) -> str:
+    if not valor.strip():
+        raise ValueError("el texto no puede estar vacío")
+    return valor
+
+
+#: Ruta relativa al directorio ``runs/<run_id>/`` de la corrida.
+RutaRelativa = Annotated[str, AfterValidator(_exigir_relativa)]
+
+#: Texto con contenido real: ni vacío ni solo espacios.
+TextoNoVacio = Annotated[str, AfterValidator(_exigir_texto)]
+
+#: Digest SHA-256 en hexadecimal minúscula.
+Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+def hash_guion(full_text: str) -> str:
+    """Huella del guion que se narró, tal como la definen los contratos de voz.
+
+    La normalización es deliberadamente mínima —solo se recortan los espacios
+    de los extremos— porque cualquier transformación lingüística adicional
+    haría que dos guiones distintos compartieran huella.
+    """
+    return hashlib.sha256(full_text.strip().encode("utf-8")).hexdigest()
 
 
 class Artefacto(BaseModel):
@@ -267,26 +326,192 @@ class AdaptedScript(Artefacto):
 # ---------------------------------------------------------------------------
 
 
-class VoiceAsset(Artefacto):
-    """Narración sintetizada con sus tiempos por palabra."""
+class ArtefactoVoz(Artefacto):
+    """Base de los artefactos de voz y subtítulos.
 
-    audio_path: str
-    duration_s: float
-    provider: str
-    voice_name: str
-    word_boundaries: list[PalabraTiempo] = Field(default_factory=list)
-    fallback_used: bool = False
+    Solo cambia la versión de schema: estos artefactos nacen en Gate 3 con la
+    suya propia, mientras los de Gates anteriores conservan la que ya tienen
+    persistida.
+    """
+
+    schema_version: str = SCHEMA_VERSION_VOZ
 
 
-class SubtitleAsset(Artefacto):
-    """Subtítulos propios: SRT canónico y ASS derivado para el burn-in."""
+class VoiceAsset(ArtefactoVoz):
+    """Narración sintetizada por el proveedor de TTS.
 
-    srt_path: str
-    ass_path: str | None = None
-    cue_count: int
-    max_chars_per_line: int
-    # Reglas que no pudieron cumplirse; se reportan, no se ocultan.
-    violations: list[str] = Field(default_factory=list)
+    ``audio_duration_seconds`` es la duración **medida sobre el archivo**, no
+    la estimación del guion ni el final del último ``WordBoundary``: Gate 0.5
+    comprobó que Edge TTS deja cola de audio tras el último evento. Es el valor
+    de referencia para el final del video.
+
+    ``source_script_sha256`` identifica el ``AdaptedScript.full_text`` que se
+    narró. El texto completo **no** se copia aquí: con la huella basta para
+    detectar que el audio ya no corresponde al guion actual.
+    """
+
+    language: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    # El proveedor puede no tener "modelo" en el sentido de un LLM. Edge TTS
+    # expone un motor de síntesis, así que el campo se llama como lo que es.
+    engine: str = Field(min_length=1)
+    voice: str = Field(min_length=1)
+    audio_path: RutaRelativa
+    audio_format: str = Field(min_length=1)
+    audio_duration_seconds: float = Field(gt=0)
+    sample_rate_hz: int = Field(gt=0)
+    channels: int = Field(ge=1)
+    source_script_sha256: Sha256Hex
+
+
+class WordBoundary(BaseModel):
+    """Una unidad temporal tal como la entrega el proveedor de TTS.
+
+    ``end_seconds`` es derivado a propósito: persistirlo junto a ``start`` y
+    ``duration`` permitiría que los tres dejaran de cuadrar entre sí.
+
+    El texto viene del proveedor y **no** sirve como texto del subtítulo: Edge
+    TTS lo emite sin puntuación y a veces agrupa varios tokens del guion en un
+    solo evento.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    start_seconds: float = Field(ge=0)
+    duration_seconds: float = Field(gt=0)
+    text: TextoNoVacio
+
+    @property
+    def end_seconds(self) -> float:
+        return self.start_seconds + self.duration_seconds
+
+
+class WordBoundaryAsset(ArtefactoVoz):
+    """Los tiempos por palabra de una narración, con su audio de referencia.
+
+    No se exige que los ``boundaries`` cubran todo el audio: que el último
+    termine antes de ``audio_duration_seconds`` es normal y está explícitamente
+    permitido, porque Edge TTS deja una cola de audio tras el último evento.
+    """
+
+    provider: str = Field(min_length=1)
+    engine: str = Field(min_length=1)
+    voice: str = Field(min_length=1)
+    audio_path: RutaRelativa
+    audio_duration_seconds: float = Field(gt=0)
+    boundaries: list[WordBoundary] = Field(default_factory=list)
+    source_script_sha256: Sha256Hex
+
+    @model_validator(mode="after")
+    def _comprobar_boundaries(self) -> "WordBoundaryAsset":
+        if not self.boundaries:
+            return self
+        if self.boundaries[0].index != 0:
+            raise ValueError(
+                f"el primer boundary tiene index {self.boundaries[0].index}; "
+                f"la numeración empieza en 0"
+            )
+        for anterior, siguiente in zip(self.boundaries, self.boundaries[1:]):
+            if siguiente.index == anterior.index:
+                raise ValueError(f"index duplicado: {siguiente.index}")
+            if siguiente.index < anterior.index:
+                raise ValueError(
+                    f"boundaries desordenados: index {siguiente.index} después "
+                    f"de {anterior.index}"
+                )
+            if siguiente.start_seconds < anterior.start_seconds:
+                raise ValueError(
+                    f"el boundary {siguiente.index} empieza en "
+                    f"{siguiente.start_seconds}s, antes que el {anterior.index} "
+                    f"en {anterior.start_seconds}s"
+                )
+        return self
+
+
+class SubtitleCue(BaseModel):
+    """Un subtítulo con su tramo de tiempo.
+
+    Los tiempos se guardan en segundos. La marca ``00:00:02,340`` pertenece al
+    serializador de SRT, no al artefacto.
+
+    ``text`` puede contener saltos de línea: son los del subtítulo, y tanto el
+    SRT como el ASS los necesitan. Guardarlos aquí evita que el ASS tenga que
+    recalcular el reparto de líneas y convertirse en una segunda fuente.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Empieza en 1 porque es el índice del bloque SRT.
+    index: int = Field(ge=1)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float
+    text: TextoNoVacio
+
+    @model_validator(mode="after")
+    def _comprobar_tiempos(self) -> "SubtitleCue":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError(
+                f"el cue {self.index} termina en {self.end_seconds}s, que no es "
+                f"posterior a su inicio en {self.start_seconds}s"
+            )
+        return self
+
+
+class SubtitleAsset(ArtefactoVoz):
+    """Subtítulos propios: el SRT es el canónico y el ASS su presentación.
+
+    ``max_lines`` y ``target_chars_per_line`` quedan fijados por el contrato en
+    2 y 32. Son una heurística de legibilidad, no una ley: cambiarlos exige
+    evolucionar el schema, no reconfigurar una corrida, para que un artefacto
+    no pueda declarar una regla distinta de la que se aplicó.
+    """
+
+    language: str = Field(min_length=1)
+    source_script_sha256: Sha256Hex
+    word_boundary_artifact: RutaRelativa
+    srt_path: RutaRelativa
+    ass_path: RutaRelativa
+    cue_count: int = Field(ge=0)
+    duration_seconds: float = Field(gt=0)
+    max_lines: int
+    target_chars_per_line: int
+    cues: list[SubtitleCue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _comprobar_cues(self) -> "SubtitleAsset":
+        if self.max_lines != MAX_LINEAS_SUBTITULO:
+            raise ValueError(
+                f"max_lines debe ser {MAX_LINEAS_SUBTITULO}; recibido {self.max_lines}"
+            )
+        if self.target_chars_per_line != CARACTERES_OBJETIVO_LINEA:
+            raise ValueError(
+                f"target_chars_per_line debe ser {CARACTERES_OBJETIVO_LINEA}; "
+                f"recibido {self.target_chars_per_line}"
+            )
+        if self.cue_count != len(self.cues):
+            raise ValueError(
+                f"cue_count declara {self.cue_count} cues y la lista trae "
+                f"{len(self.cues)}"
+            )
+        if self.cues and self.cues[0].index != 1:
+            raise ValueError(
+                f"el primer cue tiene index {self.cues[0].index}; la numeración "
+                f"SRT empieza en 1"
+            )
+        for anterior, siguiente in zip(self.cues, self.cues[1:]):
+            if siguiente.index <= anterior.index:
+                raise ValueError(
+                    f"índices de cue no crecientes: {siguiente.index} después "
+                    f"de {anterior.index}"
+                )
+            if siguiente.start_seconds < anterior.end_seconds:
+                raise ValueError(
+                    f"el cue {siguiente.index} empieza en "
+                    f"{siguiente.start_seconds}s y el {anterior.index} aún no "
+                    f"ha terminado en {anterior.end_seconds}s"
+                )
+        return self
 
 
 class TipoTransformacion(str, Enum):

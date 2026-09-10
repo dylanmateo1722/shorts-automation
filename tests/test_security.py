@@ -90,8 +90,15 @@ def test_la_configuracion_publica_no_expone_secretos(entorno_con_secretos, tmp_p
         "runs_dir", "mpt_dir", "mpt_timeout_s", "log_level",
         "llm_provider", "llm_model", "target_language", "default_wpm",
         "translation_prompt_version", "adaptation_prompt_version",
+        "tts_provider", "tts_voice", "tts_rate", "tts_pitch",
+        "subtitle_margin_v", "subtitle_margin_h",
+        "subtitle_font", "subtitle_font_size",
     }
     assert "llm_api_key" not in publico
+    # El TTS primario no usa credencial y el fallback no existe, pero la
+    # variable del fallback está documentada en .env.example: que no aparezca
+    # aquí es parte de la lista cerrada.
+    assert "elevenlabs_api_key" not in publico
 
 
 def test_el_manifest_no_contiene_secretos(entorno_con_secretos, tmp_path):

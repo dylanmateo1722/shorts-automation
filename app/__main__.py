@@ -1,7 +1,7 @@
 """CLI del orquestador.
 
-    python -m app run [--pipeline render|linguistic] [--run-id UUID] [--force STAGE]
-    python -m app validate <run-id> [--pipeline render|linguistic]
+    python -m app run [--pipeline render|linguistic|voice] [--run-id UUID] [--force STAGE]
+    python -m app validate <run-id> [--pipeline render|linguistic|voice]
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -20,10 +20,23 @@ from app.core.logging import configurar_logging
 from app.core.run_id import nuevo_run_id, parsear_run_id
 from app.pipeline.core import construir_pipeline, ejecutar_run, validar_run
 from app.pipeline.linguistic import construir_pipeline_linguistico
+from app.pipeline.voice import construir_pipeline_voz
+
+
+def _pipeline_voz() -> list:
+    """Transcript → … → AdaptedScript → VoiceAsset → SubtitleAsset.
+
+    La voz no se ejecuta sola: necesita un guion adaptado. Encadenar aquí las
+    etapas lingüísticas evita tener que lanzar dos corridas y mantiene un solo
+    ``run_id`` para todos los artefactos.
+    """
+    return construir_pipeline_linguistico() + construir_pipeline_voz()
+
 
 PIPELINES = {
     "render": construir_pipeline,
     "linguistic": construir_pipeline_linguistico,
+    "voice": _pipeline_voz,
 }
 
 
@@ -40,7 +53,7 @@ def _construir_parser() -> argparse.ArgumentParser:
     )
     ejecutar.add_argument(
         "--transcript", default=None, metavar="RUTA",
-        help="transcript JSON de partida; obligatorio para --pipeline linguistic",
+        help="transcript JSON de partida; obligatorio para linguistic y voice",
     )
     ejecutar.add_argument(
         "--target-duration", type=float, default=None, metavar="SEGUNDOS",

@@ -58,6 +58,12 @@ class Etapa:
         validar: comprobación adicional opcional sobre un artefacto ya
             existente; sirve para detectar que el JSON es válido pero el
             archivo al que apunta desapareció.
+        vigente: comprobación opcional de que un artefacto válido sigue
+            correspondiendo a la **configuración actual**. Es distinta de
+            ``validar``: un audio puede estar perfectamente bien y aun así
+            haber dejado de servir porque cambió la voz o el guion. Recibe el
+            contexto entero porque esa decisión necesita la configuración de la
+            corrida, no solo el directorio.
     """
 
     nombre: str
@@ -65,6 +71,7 @@ class Etapa:
     modelo: type[Artefacto]
     ejecutar: Callable[["ContextoEtapa"], Artefacto]
     validar: Callable[[Artefacto, Workspace], None] | None = None
+    vigente: Callable[[Artefacto, "ContextoEtapa"], None] | None = None
 
 
 @dataclass
@@ -109,6 +116,18 @@ class StageRunner:
         self.producidos: dict[str, Artefacto] = {}
         self.recursos: dict = {}
 
+    # --- contexto ----------------------------------------------------------
+
+    def _contexto(self) -> ContextoEtapa:
+        return ContextoEtapa(
+            workspace=self.workspace,
+            manifest=self.manifest,
+            settings=self.settings,
+            previos=dict(self.producidos),
+            parametros=dict(self.parametros),
+            recursos=self.recursos,
+        )
+
     # --- idempotencia ------------------------------------------------------
 
     def _artefacto_reutilizable(self, etapa: Etapa) -> Artefacto | None:
@@ -123,13 +142,18 @@ class StageRunner:
                 reason=type(exc).__name__,
             )
             return None
-        if etapa.validar is not None:
+        for comprobacion in (
+            (lambda: etapa.validar(artefacto, self.workspace)) if etapa.validar else None,
+            (lambda: etapa.vigente(artefacto, self._contexto())) if etapa.vigente else None,
+        ):
+            if comprobacion is None:
+                continue
             try:
-                etapa.validar(artefacto, self.workspace)
+                comprobacion()
             except ErrorPipeline as exc:
                 log_evento(
                     self.workspace.run_id, etapa.nombre, "artifact_invalid",
-                    reason=type(exc).__name__,
+                    reason=type(exc).__name__, detail=exc.mensaje,
                 )
                 return None
         return artefacto
@@ -147,7 +171,9 @@ class StageRunner:
                 entrada.status = EstadoEtapa.omitida
                 entrada.finished_at = _ahora()
                 entrada.error = None
-                entrada.metadata = _procedencia(existente)
+                # Se fusiona, no se reemplaza: al omitir, la etapa no corre y
+                # lo que registró la vez anterior es lo único que hay.
+                entrada.metadata = {**entrada.metadata, **_procedencia(existente)}
                 if etapa.artefacto not in entrada.artifacts:
                     entrada.artifacts.append(etapa.artefacto)
                 self._registrar_artefacto(etapa.artefacto)
@@ -164,15 +190,7 @@ class StageRunner:
 
         inicio = time.monotonic()
         try:
-            contexto = ContextoEtapa(
-                workspace=self.workspace,
-                manifest=self.manifest,
-                settings=self.settings,
-                previos=dict(self.producidos),
-                parametros=dict(self.parametros),
-                recursos=self.recursos,
-            )
-            artefacto = etapa.ejecutar(contexto)
+            artefacto = etapa.ejecutar(self._contexto())
         except ErrorPipeline as exc:
             duracion = time.monotonic() - inicio
             entrada.status = EstadoEtapa.fallida
@@ -192,7 +210,10 @@ class StageRunner:
         entrada.status = EstadoEtapa.completada
         entrada.finished_at = _ahora()
         entrada.duration_s = round(duracion, 3)
-        entrada.metadata = _procedencia(artefacto)
+        # Fusión, no reemplazo: una etapa puede haber anotado en el manifest
+        # datos que no salen de la procedencia del artefacto (la voz usada, la
+        # duración medida). Sobrescribirlos aquí los perdería.
+        entrada.metadata = {**entrada.metadata, **_procedencia(artefacto)}
         if etapa.artefacto not in entrada.artifacts:
             entrada.artifacts.append(etapa.artefacto)
         self._registrar_artefacto(etapa.artefacto)

@@ -30,6 +30,11 @@ SUBDIR_PROMPTS = Path("prompts")
 # medirá cuando exista audio.
 WPM_POR_DEFECTO = 119
 
+# Voz de la narración. Es la que se midió en Gate 0.5; no se afirma que sea
+# mejor que otra, solo que es la única sobre la que hay medición. Configurable
+# con TTS_VOICE.
+VOZ_TTS_POR_DEFECTO = "es-CR-JuanNeural"
+
 
 def _entero(nombre: str, por_defecto: int) -> int:
     bruto = os.environ.get(nombre)
@@ -68,6 +73,22 @@ class Settings:
     # cada intento es una llamada al modelo y cuesta dinero.
     max_condensation_attempts: int = 2
 
+    # --- voz y subtítulos ---
+    # Edge TTS es el proveedor inicial: es el único validado (Gate 0.5) y no
+    # requiere credencial. "fake" es el de los tests y CI.
+    tts_provider: str = "edge"
+    tts_voice: str = VOZ_TTS_POR_DEFECTO
+    tts_rate: str = ""
+    tts_pitch: str = ""
+    tts_timeout_s: int = 120
+    # Zona segura del subtítulo quemado. Heurísticos: la franja inferior de un
+    # Short la tapa la interfaz de YouTube, pero su altura exacta está pendiente
+    # de medir sobre la app real. Se validará visualmente en Gate 5.
+    subtitle_margin_v: int = 420
+    subtitle_margin_h: int = 60
+    subtitle_font: str = "DejaVu Sans"
+    subtitle_font_size: int = 64
+
     @classmethod
     def desde_entorno(cls) -> "Settings":
         """Construye la configuración leyendo el entorno."""
@@ -90,6 +111,15 @@ class Settings:
             adaptation_prompt_version=os.environ.get(
                 "ADAPTATION_PROMPT_VERSION", "v1"
             ).strip(),
+            tts_provider=os.environ.get("TTS_PROVIDER", "edge").strip(),
+            tts_voice=os.environ.get("TTS_VOICE", VOZ_TTS_POR_DEFECTO).strip(),
+            tts_rate=os.environ.get("TTS_RATE", "").strip(),
+            tts_pitch=os.environ.get("TTS_PITCH", "").strip(),
+            tts_timeout_s=_entero("TTS_TIMEOUT_S", 120),
+            subtitle_margin_v=_entero("SUBTITLE_MARGIN_V", 420),
+            subtitle_margin_h=_entero("SUBTITLE_MARGIN_H", 60),
+            subtitle_font=os.environ.get("SUBTITLE_FONT", "DejaVu Sans").strip(),
+            subtitle_font_size=_entero("SUBTITLE_FONT_SIZE", 64),
         )
 
     # --- MoneyPrinterTurbo -------------------------------------------------
@@ -153,6 +183,21 @@ class Settings:
                 f"DEFAULT_WPM debe ser mayor que cero; recibido {self.default_wpm}"
             )
 
+    def verificar_tts(self) -> None:
+        """Comprueba que hay proveedor y voz antes de intentar sintetizar.
+
+        Raises:
+            ConfiguracionInvalida: nombrando la variable que falta.
+        """
+        if not self.tts_provider:
+            raise ConfiguracionInvalida(
+                "falta TTS_PROVIDER; configúralo en .env o en el entorno"
+            )
+        if not self.tts_voice:
+            raise ConfiguracionInvalida(
+                "falta TTS_VOICE; una corrida no puede narrar sin voz elegida"
+            )
+
     # --- manifest ----------------------------------------------------------
 
     def publico(self) -> dict:
@@ -172,6 +217,14 @@ class Settings:
             "default_wpm": self.default_wpm,
             "translation_prompt_version": self.translation_prompt_version,
             "adaptation_prompt_version": self.adaptation_prompt_version,
+            "tts_provider": self.tts_provider,
+            "tts_voice": self.tts_voice,
+            "tts_rate": self.tts_rate,
+            "tts_pitch": self.tts_pitch,
+            "subtitle_margin_v": self.subtitle_margin_v,
+            "subtitle_margin_h": self.subtitle_margin_h,
+            "subtitle_font": self.subtitle_font,
+            "subtitle_font_size": self.subtitle_font_size,
         }
 
     def _relativa(self, ruta: Path) -> str:

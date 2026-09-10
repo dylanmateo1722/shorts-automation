@@ -64,6 +64,15 @@ class LimiteDeTasa(ErrorTransitorio):
     """El servicio remoto respondió con un límite de tasa."""
 
 
+class ProveedorNoDisponible(ErrorTransitorio):
+    """No se pudo hablar con el proveedor: conexión caída o servicio fuera.
+
+    Es transitorio a propósito. Un TTS que no responde ahora suele responder
+    dentro de un minuto, y confundirlo con un error de contenido llevaría a
+    descartar un guion perfectamente válido.
+    """
+
+
 # --- Permanentes -----------------------------------------------------------
 
 
@@ -94,6 +103,28 @@ class ContenidoInvalido(ErrorPermanente):
     Idioma equivocado, cifras alteradas, datos inventados o duración
     imposible. Es un problema de contenido, no de transporte.
     """
+
+
+class AudioInvalido(ErrorPermanente):
+    """El audio generado no sirve: no existe, está vacío, no dura o no decodifica.
+
+    Se separa de los errores del proveedor porque aquí el proveedor sí
+    respondió: lo que falla es el archivo resultante, y reintentar la llamada
+    no lo arregla por sí solo.
+    """
+
+
+class AlineacionInvalida(ErrorPermanente):
+    """Los tiempos del TTS no pueden alinearse con el guion.
+
+    Faltan palabras, sobran incompatibles o la correspondencia es ambigua.
+    Nunca se adivina en silencio: un subtítulo desincronizado es peor que un
+    fallo visible.
+    """
+
+
+class SubtituloInvalido(ErrorPermanente):
+    """Los cues generados incumplen una regla que invalida el subtitulado."""
 
 
 class LicenciaDenegada(ErrorPermanente):

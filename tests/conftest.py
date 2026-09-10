@@ -92,3 +92,74 @@ def entrada_controlada(workspace) -> dict:
 def ultima_invocacion(motor: Path) -> dict:
     """Argumentos con los que se llamó al motor falso."""
     return json.loads((motor / "ultima_invocacion.json").read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Voz y subtítulos
+# ---------------------------------------------------------------------------
+
+#: Guion de referencia de Gate 0.5. Es exactamente el texto que se narró para
+#: grabar ``fixtures/wordboundaries_es_cr.json``, así que esos tiempos reales
+#: de Edge TTS sirven para probar la alineación sin red y sin credenciales.
+GUION_REFERENCIA = (
+    "¿Sabías que el 73 % de los videos cortos se abandonan antes de los 3 segundos? "
+    "¡Increíble! En este video te explico, paso a paso, cómo diseñar un gancho que retenga "
+    "a tu audiencia. Analizaremos 5 técnicas comprobadas con ejemplos reales de canales en "
+    "español. La señora Muñoz, experta en marketing digital, comparte además su método "
+    "favorito. ¿Listo para empezar?"
+)
+
+#: Duración real de ese MP3, medida en Gate 0.5. El último WordBoundary termina
+#: antes: hay casi un segundo de cola de audio.
+DURACION_REFERENCIA_S = 30.29
+
+
+@pytest.fixture
+def limites_reales() -> list[dict]:
+    """Eventos WordBoundary auténticos de ``es-CR-JuanNeural``."""
+    ruta = RAIZ_TESTS / "fixtures" / "wordboundaries_es_cr.json"
+    return json.loads(ruta.read_text(encoding="utf-8"))
+
+
+def construir_guion(run_id: uuid.UUID, texto: str = GUION_REFERENCIA):
+    """AdaptedScript mínimo y válido a partir de un texto."""
+    from app.contracts.models import (
+        AdaptedScript,
+        ProcedenciaIA,
+        SeccionGuion,
+        TipoSeccion,
+    )
+    from app.pipeline import validacion
+
+    return AdaptedScript(
+        run_id=run_id,
+        language="es",
+        hook=texto.split(".")[0].strip() or texto,
+        sections=[SeccionGuion(kind=TipoSeccion.hook, text=texto, order=0)],
+        full_text=texto,
+        target_duration_seconds=30.0,
+        estimated_duration_seconds=validacion.estimar_duracion_s(texto, 119),
+        provenance=ProcedenciaIA(provider="fake", model="fake-1", prompt_version="v1"),
+    )
+
+
+@pytest.fixture
+def settings_voz(tmp_path) -> Settings:
+    """Configuración con el proveedor de TTS falso y un runs/ temporal."""
+    return Settings(
+        raiz_proyecto=tmp_path,
+        raiz_runs=tmp_path / "runs",
+        raiz_mpt=tmp_path / "motor",
+        log_level="INFO",
+        tts_provider="fake",
+        tts_voice="es-CR-JuanNeural",
+    )
+
+
+@pytest.fixture
+def workspace_voz(settings_voz) -> Workspace:
+    """Directorio de corrida con un guion adaptado ya escrito."""
+    ws = Workspace(settings_voz.raiz_runs, uuid.uuid4())
+    ws.crear()
+    ws.escribir_artefacto("adapted_script", construir_guion(ws.run_id))
+    return ws
