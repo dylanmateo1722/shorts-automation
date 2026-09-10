@@ -1,0 +1,4 @@
+# Gate 0.5 Proof of Concept - dependencias mínimas.
+# El PoC no requiere ninguna credencial: Edge TTS no usa API key.
+edge-tts==7.2.7
+imageio-ffmpeg==0.6.0
