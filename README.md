@@ -16,13 +16,14 @@ configuración ni historial con ese repositorio.
 | Gate 1 | Contratos, run/manifest, adaptador y pipeline mínimo | Aprobado |
 | Gate 2 | Traducción y adaptación editorial al español | Aprobado |
 | Gate 3 | TTS, WordBoundaries y subtítulos (SRT + ASS) | Aprobado |
-| **Gate 4** | **Procedencia, transformación editorial y QA técnica** | **En verificación** |
-| Gate 5+ | Composición y render final, Discovery, publicación | No iniciado |
+| Gate 4 | Procedencia, transformación editorial y QA técnica | Aprobado |
+| **Gate 5** | **MVP de extremo a extremo: composición y MP4 final** | **En verificación** |
+| Gate 6+ | Discovery, análisis de competencia, publicación | No iniciado |
 
-Lo que hoy existe es la columna vertebral técnica, la capa lingüística, la de
-voz y subtítulos, la de transformación con su QA técnica, y el PoC de Gate 0.5.
-**No hay** composición final, ni render del producto, ni Discovery, ni análisis
-de competencia, ni integración con YouTube, ni publicación.
+Con Gate 5 el pipeline produce un **Short vertical real**: 1080×1920, H.264,
+AAC, con narración, subtítulos y rótulo propios, validado sobre el archivo.
+**No hay** Discovery, ni scraping, ni análisis de competencia, ni integración
+con YouTube, ni publicación, ni planificación.
 
 ## Arquitectura actual
 
@@ -56,7 +57,10 @@ Cuatro reglas que el código impone, no solo documenta:
   estimación del guion ni del último tiempo que reporte el TTS.
 - **Un recurso de referencia no puede acabar en el render.** No es una
   convención de nombres: el contrato de procedencia se niega a validar si uno
-  aparece entre los utilizables.
+  aparece entre los utilizables, y la puerta se aplica **antes** de invocar el
+  motor.
+- **Las propiedades del MP4 se leen del archivo.** Que el motor las configurara
+  no es evidencia de que estén.
 
 ## Instalación
 
@@ -463,13 +467,134 @@ aviso a error sin razón técnica convertiría una heurística en un veredicto.
 contrato comprueba que cuadre con las comprobaciones, así que un informe no
 puede declararse aprobado mientras tenga errores.
 
-### Qué queda pendiente para Gate 5
+## El render de extremo a extremo
 
-La composición final: quemar los subtítulos y el overlay sobre el material
-visual, invocar el motor de render, y el QA del MP4 resultante —resolución,
-fps, volumen, duración—, que es lo que ya prueba el PoC de Gate 0.5 pero todavía
-no está integrado en el pipeline. La duración de referencia para ese vídeo sigue
-siendo `VoiceAsset.audio_duration_seconds`.
+```
+material ─→ render_job ─→ MoneyPrinterTurbo ─→ composición FFmpeg ─→ QA del MP4
+              │  puerta de           │                  │                │
+              │  procedencia    render/final.mp4   final/short.mp4   fotogramas
+```
+
+Catorce etapas desde un transcript hasta un MP4 vertical validado, con un solo
+`run_id` y un solo directorio.
+
+### Quién hace qué
+
+**MoneyPrinterTurbo** monta el vídeo base: encaja el material visual con la
+narración y produce un MP4 vertical sin subtítulos. Sigue siendo un motor
+externo fijado por commit, invocado por CLI a través de `app/adapters/mpt.py`,
+que es el **único** punto de contacto del proyecto con él.
+
+**FFmpeg** hace la composición final: superpone las capas ASS —subtítulos y
+rótulo— en una sola pasada y produce el MP4 que se publica. El motor no acepta
+un SRT externo, así que los subtítulos son nuestros y se incrustan después.
+
+Son **etapas separadas** a propósito. Si FFmpeg falla tras un render correcto,
+repetir el motor costaría minutos sin arreglar nada: la idempotencia reutiliza
+el intermedio y solo rehace la composición. Ocurrió durante el desarrollo de
+este Gate y es exactamente lo que se quería.
+
+Todo el texto sobre vídeo pasa por **libass**, nunca por `drawtext`: el FFmpeg
+que empaqueta `imageio-ffmpeg` no incluye ese filtro.
+
+### Entradas permitidas
+
+El material visual lo **genera el pipeline**: un degradado vertical del largo de
+la narración, determinista y local. **No se descarga contenido de terceros**, y
+un Short ajeno nunca es la fuente del render.
+
+Que sea sobrio es intencionado. Gate 5 demuestra que la cadena produce un vídeo
+técnicamente válido; el material visual de producción es una decisión editorial
+posterior.
+
+### La puerta de procedencia
+
+Antes de invocar el motor, `render_job` resuelve **cada** recurso que entraría
+al vídeo —audio, material, subtítulos, rótulo— contra el ledger de Gate 4:
+
+1. si no está declarado → se rechaza;
+2. si está clasificado `reference_only` → se rechaza;
+3. si el archivo no existe → se rechaza;
+4. y solo entonces se construye el job.
+
+También se exigen los cinco elementos de transformación: si falta uno, no se
+renderiza. Reutilizar un job anterior tampoco se salta la puerta — si un recurso
+pierde la autorización, el job deja de ser válido aunque el archivo siga ahí.
+
+Hay un test que lo demuestra donde importa: tras el bloqueo, el directorio
+`render/` **ni siquiera existe**. El motor no llegó a ejecutarse.
+
+### RenderJob y RenderResult
+
+`RenderJob` referencia lo que entra al vídeo en vez de copiarlo, y expone
+`assets_de_render` para que la puerta tenga un único sitio al que preguntar. La
+excepción es `script`, que se guarda entero porque el CLI del motor lo exige
+como argumento literal.
+
+`RenderResult` describe **un MP4 inspeccionado**, y `renderer` dice cuál:
+
+| artefacto | `renderer` | qué es |
+|---|---|---|
+| `render_result.json` | `moneyprinterturbo` | el vídeo del motor, intermedio |
+| `final_video.json` | `ffmpeg-libass-burn-in` | el vídeo que se publica |
+
+El final registra `sha256`, resolución, cadencia, códecs, formato de píxel,
+frecuencia de muestreo, tamaño y con qué herramienta se leyó todo. Ninguno de
+esos valores se hereda del motor: se miden sobre el archivo.
+
+### QA del vídeo final
+
+`render completed = true` no es evidencia de nada. La QA abre el MP4 y
+comprueba: existe, la ruta es relativa, el tamaño es mayor que cero, el SHA-256
+coincide con el registrado, 1080×1920, H.264, AAC, `yuv420p`, cadencia y
+frecuencia de muestreo válidas, duración positiva, el vídeo dura lo que la
+narración, los subtítulos caben dentro, las dos capas se compusieron y el final
+no es el intermedio del motor.
+
+### Validación visual y su límite
+
+**Ninguna de esas comprobaciones demuestra que el subtítulo se vea.** Un ASS
+puede componerse sin un solo error y quedar fuera de cuadro.
+
+Por eso la QA extrae cinco fotogramas —uno dentro de la ventana del rótulo— y
+los junta en `qa/contact_sheet.png`. La automatización afirma que las capas se
+compusieron; que se **vean** lo decide una persona mirando, y eso queda escrito
+como un aviso permanente en el informe en lugar de disfrazarse de comprobación.
+
+Sobre la inspección visual de este Gate hay un hallazgo real: durante los
+primeros segundos el rótulo y el primer subtítulo **muestran el mismo texto**,
+porque ambos salen del gancho del guion. Es redundante en pantalla y ffprobe
+jamás lo habría detectado. Queda registrado como asunto editorial pendiente; no
+se ha cambiado la semántica del overlay aprobada en Gate 4.
+
+### Sincronía
+
+Se registran tres duraciones y **no se fuerza** que coincidan: nunca se recorta
+contenido ni se estira el audio para cuadrarlas.
+
+| valor | de dónde sale |
+|---|---|
+| narración | medida sobre el MP3 (Gate 3) |
+| subtítulos | la duración real del audio |
+| vídeo final | medida sobre el MP4 |
+
+La referencia sigue siendo `VoiceAsset.audio_duration_seconds`. Una diferencia
+de unas décimas es un **aviso** —el muxing y el cierre del último GOP la
+producen—; media pantalla de diferencia es un **error**.
+
+### Sin ffprobe
+
+El FFmpeg que empaqueta `imageio-ffmpeg` **no trae ffprobe**, así que no se
+puede exigir. La inspección lo prefiere cuando existe en el sistema y cae a
+interpretar `ffmpeg -i` cuando no. `RenderResult.inspected_with` y el informe de
+QA dejan escrito cuál se usó en cada corrida en lugar de darlo por supuesto.
+
+### Qué queda pendiente después de Gate 5
+
+Discovery, análisis de competencia, metadatos de publicación e integración con
+YouTube. Nada de eso existe todavía. En lo visual queda el estilo de producción:
+material propio de verdad en lugar del degradado, y resolver la redundancia
+entre rótulo y primer subtítulo.
 
 ## Ejecutar una corrida
 
@@ -499,6 +624,8 @@ Hay cuatro secuencias:
   adaptado, y encadenarlas mantiene un solo `run_id` para todos los artefactos.
 - `--pipeline transformation` — el de Gate 4: lo anterior más `overlay`,
   `provenance`, `transformation` y `technical_qa`. Nueve etapas en total.
+- `--pipeline e2e` — el de Gate 5, el completo: catorce etapas desde el
+  transcript hasta el MP4 final validado. Es el único que invoca el motor.
 
 ### Una corrida completa con el fixture incluido
 
@@ -553,7 +680,20 @@ runs/<run_id>/
 ├── transformation_set.json los cinco elementos editoriales propios
 ├── qa_result.json        informe de QA técnica, con el juicio editorial aparte
 │
-│   pipeline render
+│   pipeline e2e
+├── render_material.json  material visual propio, generado por el pipeline
+├── material/base.mp4
+├── render_job.json       qué entra al vídeo, ya autorizado por la procedencia
+├── render_result.json    el vídeo del motor, intermedio
+├── final_video.json      el MP4 que se publica, con su SHA-256
+├── final_video_qa.json   QA del archivo final
+├── final/
+│   └── short.mp4         **el Short**
+├── qa/
+│   ├── frames/           fotogramas para la inspección visual
+│   └── contact_sheet.png
+│
+│   pipeline render (Gate 1)
 ├── render_job.json
 ├── render_result.json
 ├── input/                audio y material de la entrada controlada
@@ -631,8 +771,18 @@ puntúan la calidad editorial, que sigue siendo un juicio humano.
 - Los recursos de referencia **se declaran**, no se descubren. El pipeline no
   busca ni descarga nada: alguien afirma "esto lo consulté" y a partir de ahí
   queda bloqueado para el render.
-- La QA técnica recorre los artefactos de una corrida, no el vídeo final. El QA
-  del MP4 —resolución, fps, volumen, duración— existe en el PoC de Gate 0.5 y
-  todavía no está integrado en el pipeline: es trabajo de Gate 5.
+- **La validación visual es parcial por diseño.** La automatización comprueba
+  que las capas se compusieron; que el subtítulo y el rótulo se **vean** exige
+  mirar los fotogramas. Ese aviso está siempre presente en el informe.
+- **El rótulo y el primer subtítulo repiten el mismo texto** durante los
+  primeros segundos, porque los dos salen del gancho. Detectado mirando el
+  vídeo; pendiente de decisión editorial.
+- **No hay ffprobe garantizado**: el binario empaquetado no lo incluye. Se usa
+  cuando está en el sistema y se cae a `ffmpeg -i` cuando no; el informe dice
+  cuál se usó.
+- El material visual es un degradado generado por el pipeline. Sirve para
+  demostrar la cadena, no como estilo de producción.
+- No hay política de reintentos: un fallo del motor o de FFmpeg detiene la
+  corrida con su categoría y su código de salida a la vista.
 - No hay política de reintentos por etapa: solo el contrato de errores que la
   distingue transitorio, permanente e infraestructura.

@@ -1,8 +1,8 @@
 """CLI del orquestador.
 
-    python -m app run [--pipeline render|linguistic|voice|transformation]
+    python -m app run [--pipeline render|linguistic|voice|transformation|e2e]
                       [--run-id UUID] [--force STAGE] [--reference-asset RUTA]
-    python -m app validate <run-id> [--pipeline render|linguistic|voice|transformation]
+    python -m app validate <run-id> [--pipeline ...]
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -41,11 +41,31 @@ def _pipeline_transformacion() -> list:
     return _pipeline_voz() + construir_pipeline_transformacion()
 
 
+def _pipeline_e2e() -> list:
+    """Transcript → … → MP4 final → QA del vídeo. El extremo a extremo completo.
+
+    El material visual se genera **antes** de la procedencia: el ledger no puede
+    autorizar lo que todavía no existe, y la puerta de procedencia se apoya en
+    lo que el ledger declara.
+    """
+    from app.pipeline.qa_video import ETAPA_QA_VIDEO
+    from app.pipeline.render import ETAPA_MATERIAL, construir_pipeline_render
+
+    return (
+        _pipeline_voz()
+        + [ETAPA_MATERIAL]
+        + construir_pipeline_transformacion()
+        + [e for e in construir_pipeline_render() if e is not ETAPA_MATERIAL]
+        + [ETAPA_QA_VIDEO]
+    )
+
+
 PIPELINES = {
     "render": construir_pipeline,
     "linguistic": construir_pipeline_linguistico,
     "voice": _pipeline_voz,
     "transformation": _pipeline_transformacion,
+    "e2e": _pipeline_e2e,
 }
 
 

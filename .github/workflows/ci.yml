@@ -7,8 +7,11 @@
 #                Es el que decide si el código está bien, y el que demuestra
 #                desde un checkout limpio que la cadena entera funciona y que un
 #                recurso de referencia queda bloqueado para el render.
-#   integration  lento y con el motor real: comprueba que el adaptador funciona
-#                contra MoneyPrinterTurbo de verdad en un runner.
+#   integration  lento y con el motor real: produce un Short de verdad desde un
+#                checkout limpio. MoneyPrinterTurbo y FFmpeg son los auténticos
+#                —sustituirlos por falsos no probaría que sale un MP4—, y solo
+#                el LLM y el TTS son falsos, porque exigirían credenciales sin
+#                aportar nada a lo que aquí se comprueba.
 #   tts-real     aislado y contra el Edge TTS real. Está separado a propósito:
 #                así una caída del servicio externo no tumba la señal del
 #                código, y tampoco se disfraza de PASS. Si sale en rojo con
@@ -27,6 +30,7 @@ on:
       - claude/gate-2-linguistic
       - claude/gate-3-tts-subtitles
       - claude/gate-4-transformation-qa
+      - claude/gate-5-e2e-render
   pull_request:
 
 permissions:
@@ -220,9 +224,9 @@ jobs:
             runs/*/qa_result.json
 
   integration:
-    name: Integración con el motor real
+    name: E2E con el motor real
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout con submódulo del motor
@@ -268,18 +272,195 @@ jobs:
           grep -q "stage=prepare_input event=skip" /tmp/reanudacion.log
           grep -q "stage=render event=skip" /tmp/reanudacion.log
 
+      # El extremo a extremo completo, con el motor y FFmpeg **reales**. El LLM
+      # y el TTS son falsos porque no aportan nada a lo que se prueba aquí y
+      # exigirían credenciales; el vídeo, en cambio, se produce de verdad.
+      - name: E2E completo con el motor y FFmpeg reales
+        id: e2e
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+          # Un recurso consultado solo como referencia, que no debe tocar el vídeo.
+          mkdir -p "runs/$RUN_ID/reference"
+          echo "material consultado como referencia" > "runs/$RUN_ID/reference/fuente.txt"
+
+          .venv/bin/python -m app run \
+            --pipeline e2e \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/e2e.log
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline e2e
+
+          # El MP4 final existe de verdad, y no es el intermedio del motor.
+          test -s "runs/$RUN_ID/final/short.mp4"
+          test -s "runs/$RUN_ID/render/final.mp4"
+          test -s "runs/$RUN_ID/final_video.json"
+          test -s "runs/$RUN_ID/final_video_qa.json"
+          test -s "runs/$RUN_ID/qa/contact_sheet.png"
+          sha256sum "runs/$RUN_ID/final/short.mp4"
+
+          .venv/bin/python - "$RUN_ID" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+
+          raiz = Path("runs") / sys.argv[1]
+          final = json.loads((raiz / "final_video.json").read_text(encoding="utf-8"))
+          qa = json.loads((raiz / "final_video_qa.json").read_text(encoding="utf-8"))
+          job = json.loads((raiz / "render_job.json").read_text(encoding="utf-8"))
+          ledger = json.loads((raiz / "provenance_ledger.json").read_text(encoding="utf-8"))
+
+          mp4 = raiz / final["output_path"]
+          huella = hashlib.sha256(mp4.read_bytes()).hexdigest()
+          assert final["sha256"] == huella, "la huella registrada no es la del archivo"
+          assert (final["width"], final["height"]) == (1080, 1920), final
+          assert final["video_codec"] == "h264", final["video_codec"]
+          assert final["audio_codec"] == "aac", final["audio_codec"]
+          assert final["pixel_format"] == "yuv420p", final["pixel_format"]
+          assert final["audio_sample_rate_hz"] > 0, final
+          assert final["duration_s"] > 0, final
+          assert final["output_path"] != final["combined_path"], "el final es el intermedio"
+
+          # Subtítulos y overlay entraron a la composición.
+          assert job["subtitle_path"].endswith(".ass"), job
+          assert job["overlay_path"].endswith(".ass"), job
+          assert job["composition"] == "ffmpeg-libass-burn-in", job
+
+          # El recurso de referencia no llegó al vídeo por ninguna vía.
+          referencia = "reference/fuente.txt"
+          clases = {a["asset_path"]: a["source_class"] for a in ledger["assets"]}
+          assert clases[referencia] == "reference_only", clases
+          assert referencia not in ledger["render_assets"], ledger["render_assets"]
+          assert referencia not in [
+              job["audio_path"], job["subtitle_path"], job["overlay_path"],
+              *job["materials"],
+          ], job
+
+          assert qa["technical_qa_ok"] is True, [c for c in qa["checks"] if not c["ok"]]
+          assert qa["editorial_legal_assessment"]["status"] == "NOT_ASSESSED"
+          print(
+              f"MP4 {final['width']}x{final['height']} {final['video_codec']}/"
+              f"{final['audio_codec']} {final['duration_s']:.2f}s "
+              f"{final['file_size_bytes']} bytes\nsha256={huella}\n"
+              f"QA final: {qa['status']}, {len(qa['checks'])} checks, "
+              f"medido con {final['inspected_with']}"
+          )
+          PY
+
+      # No basta con que el job falle: hay que ver que el motor no llegó a
+      # ejecutarse. Si arrancara, el vídeo ya estaría hecho con material que
+      # nadie autorizó, y eso no se deshace.
+      - name: Un recurso REFERENCE_ONLY bloquea el render antes de invocar el motor
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+        run: |
+          .venv/bin/python - <<'PY'
+          import uuid
+          from app.config.settings import Settings
+          from app.contracts.models import ClaseFuente, ProvenanceLedger, RenderResult
+          from app.core.errors import ProcedenciaInvalida
+          from app.core.manifest import Manifest
+          from app.core.stage_runner import StageRunner
+          from app.core.workspace import Workspace
+          from app.pipeline import qa, render, transformation, voice
+          from app.pipeline.linguistic import construir_pipeline_linguistico
+
+          s = Settings.desde_entorno()
+          rid = uuid.uuid4()
+          ws = Workspace(s.raiz_runs, rid); ws.crear()
+          man, _ = Manifest.cargar_o_crear(ws.dir, rid, config=s.publico(), versions={})
+          runner = StageRunner(ws, man, s, {
+              "transcript_path": "tests/fixtures/transcripts/estudio_atencion.json",
+              "target_duration_seconds": 30,
+          })
+          etapas = (construir_pipeline_linguistico() + voice.construir_pipeline_voz()
+                    + [render.ETAPA_MATERIAL] + qa.construir_pipeline_transformacion())
+          for e in etapas:
+              runner.ejecutar(e)
+
+          assert not (ws.dir / "render" / "mpt.log").exists(), "el motor ya había corrido"
+
+          material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+          ledger = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+          ws.escribir_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ledger.model_copy(update={
+              "assets": [
+                  a.model_copy(update={"source_class": ClaseFuente.solo_referencia})
+                  if a.asset_path == material else a for a in ledger.assets
+              ],
+              "render_assets": [r for r in ledger.render_assets if r != material],
+          }))
+          runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ProcedenciaInvalida as exc:
+              print(f"BLOQUEADO en render_job: {exc.mensaje}")
+          else:
+              raise SystemExit("el job se construyó pese al recurso de referencia")
+
+          assert not (ws.dir / "render").exists(), "el motor se ejecutó pese al bloqueo"
+          assert not ws.existe("render_job")
+          assert not ws.existe("render_result")
+          print("MPT no se invocó: no existe runs/<run>/render/")
+          PY
+
+      - name: Reanudar no vuelve a renderizar
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+        run: |
+          RUN_ID="${{ steps.e2e.outputs.run_id }}"
+          ANTES=$(sha256sum "runs/$RUN_ID/final/short.mp4" | cut -d' ' -f1)
+          .venv/bin/python -m app run --pipeline e2e \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/e2e-reanudacion.log
+          for ETAPA in render_material render_job render composition final_video_qa; do
+            grep -q "stage=$ETAPA event=skip" /tmp/e2e-reanudacion.log
+          done
+          DESPUES=$(sha256sum "runs/$RUN_ID/final/short.mp4" | cut -d' ' -f1)
+          test "$ANTES" = "$DESPUES"
+          echo "el MP4 no se tocó: $DESPUES"
+
       - name: Publicar artefactos de la corrida
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-1-run
+          name: gate-5-e2e
           if-no-files-found: warn
           retention-days: 14
           path: |
             runs/*/manifest.json
+            runs/*/adapted_script.json
+            runs/*/voice_asset.json
+            runs/*/subtitle_asset.json
+            runs/*/overlay_spec.json
+            runs/*/provenance_ledger.json
+            runs/*/transformation_set.json
+            runs/*/qa_result.json
             runs/*/render_job.json
             runs/*/render_result.json
-            runs/*/render/final.mp4
+            runs/*/final_video.json
+            runs/*/final_video_qa.json
+            runs/*/final/short.mp4
+            runs/*/subtitles/subtitles.srt
+            runs/*/subtitles/subtitles.ass
+            runs/*/overlay/overlay.ass
+            runs/*/qa/frames/*.png
+            runs/*/qa/contact_sheet.png
+            runs/*/render/mpt.log
 
   # Único trabajo que sale a internet. Va aparte para que una caída de Edge TTS
   # no invalide la señal del código: si este sale en rojo con `tests` en verde,

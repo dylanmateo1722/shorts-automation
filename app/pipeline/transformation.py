@@ -215,6 +215,25 @@ def _referencias(ctx: ContextoEtapa) -> list[str]:
     return rutas
 
 
+def _material_visual(ws: Workspace) -> str | None:
+    """Ruta del material visual propio, si alguna etapa ya lo generó.
+
+    Se consulta por artefacto persistido, no por convención de nombre ni por
+    un estado en memoria: al reanudar una corrida la etapa que lo generó puede
+    haberse omitido, y aun así el material sigue siendo suyo.
+    """
+    from app.contracts.models import RenderResult
+
+    nombre = "render_material"
+    if not ws.existe(nombre):
+        return None
+    try:
+        material = ws.leer_artefacto(nombre, RenderResult)
+    except ArtefactoCorrupto:
+        return None
+    return material.output_path
+
+
 def registrar_procedencia(ctx: ContextoEtapa) -> ProvenanceLedger:
     """Declara cada recurso de la corrida y cuáles puede usar el render."""
     ws: Workspace = ctx.workspace
@@ -231,6 +250,15 @@ def registrar_procedencia(ctx: ContextoEtapa) -> ProvenanceLedger:
         (subtitulos.ass_path, "presentación de los subtítulos propios"),
         (overlay.overlay_path, "rótulo original generado del gancho del guion"),
     ]
+
+    # El material visual, cuando la corrida llega al render. Se lee del artefacto
+    # y no de una lista fija porque la etapa que lo genera es posterior a este
+    # Gate: si no existe, la corrida termina en la QA de artefactos y no hay
+    # nada visual que autorizar.
+    if (material := _material_visual(ws)) is not None:
+        propios.append(
+            (material, "material visual generado por el pipeline, sin terceros")
+        )
     assets = [
         AssetProvenance(
             asset_path=ruta,
@@ -301,6 +329,8 @@ def procedencia_vigente(artefacto: ProvenanceLedger, ctx: ContextoEtapa) -> None
         voz.audio_path, subtitulos.srt_path, subtitulos.ass_path,
         overlay.overlay_path,
     }
+    if (material := _material_visual(ctx.workspace)) is not None:
+        esperados.add(material)
     if esperados - set(artefacto.render_assets):
         raise ArtefactoCorrupto(
             "el ledger no cubre todos los recursos propios de la corrida"

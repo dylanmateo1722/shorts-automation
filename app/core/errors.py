@@ -149,6 +149,15 @@ class TransformacionIncompleta(ErrorPermanente):
     """
 
 
+class ComposicionFallida(ErrorPermanente):
+    """FFmpeg no pudo componer el vídeo final.
+
+    Se distingue del fallo del motor de render a propósito: si el motor produjo
+    su vídeo y lo que falla es la composición, repetir el render costaría
+    minutos sin arreglar nada.
+    """
+
+
 class QAFallido(ErrorPermanente):
     """El resultado no pasó los controles técnicos."""
 

@@ -708,23 +708,47 @@ class ModoAjuste(str, Enum):
 
 
 class RenderJob(Artefacto):
-    """Entrada del motor de render.
+    """Entrada del motor de render y de la composición posterior.
 
     ``task_id`` es el mismo valor que ``run_id``: MoneyPrinterTurbo lo exige
     como ``--task-id`` y mantenerlos iguales hace trazables sus artefactos sin
     llevar un mapeo aparte.
+
+    Los campos de subtítulos y overlay son **referencias**, no copias: el job
+    dice qué archivos entran a la pieza, y quien quiera su contenido lo lee del
+    artefacto correspondiente. ``script`` es la excepción y se guarda entero
+    porque el CLI del motor lo exige como argumento literal.
+
+    ``assets_de_render`` es la lista completa de lo que acaba dentro del vídeo.
+    Existe para que la puerta de procedencia tenga un sitio único al que
+    preguntar, en vez de recorrer campos sueltos y olvidarse de uno.
     """
 
     task_id: UUID
     script: str = Field(min_length=1)
-    audio_path: str
-    materials: list[str] = Field(min_length=1)
+    audio_path: RutaRelativa
+    materials: list[RutaRelativa] = Field(min_length=1)
     aspect: RelacionAspecto = RelacionAspecto.vertical
     fit_mode: ModoAjuste = ModoAjuste.cubrir
     # Los subtítulos son nuestros: el motor renderiza sin ellos y el burn-in
     # es un paso posterior.
     subtitles_enabled: bool = False
     bgm_type: Literal["none", "random"] = "none"
+    # --- composición (Gate 5) ---
+    subtitle_path: RutaRelativa | None = None
+    overlay_path: RutaRelativa | None = None
+    output_path: RutaRelativa | None = None
+    composition: str | None = None
+    # Commit del motor con el que se construyó el job. Si el pin cambia, el
+    # resultado anterior deja de describir lo que produciría ahora.
+    engine_commit: str | None = None
+
+    @property
+    def assets_de_render(self) -> list[str]:
+        """Todo lo que entra al vídeo, en un solo sitio."""
+        rutas = [self.audio_path, *self.materials]
+        rutas += [r for r in (self.subtitle_path, self.overlay_path) if r]
+        return rutas
 
 
 class EstadoRender(str, Enum):
@@ -733,12 +757,24 @@ class EstadoRender(str, Enum):
 
 
 class RenderResult(Artefacto):
-    """Salida del motor, ya validada y tipada."""
+    """Un MP4 producido por el pipeline, ya inspeccionado y tipado.
+
+    El mismo contrato describe dos cosas distintas según quién lo produzca, y
+    ``renderer`` dice cuál: el vídeo que devuelve el motor (``moneyprinterturbo``)
+    y el vídeo final compuesto (``ffmpeg-composition``). Son dos artefactos
+    separados a propósito —``render_result`` y ``final_video``— porque si la
+    composición falla después de un render correcto, repetir el motor costaría
+    minutos sin motivo: la idempotencia debe poder reutilizar el intermedio.
+
+    Todos los valores medidos salen de inspeccionar el archivo, no de lo que el
+    motor diga haber configurado. ``inspected_with`` registra con qué
+    herramienta se leyeron.
+    """
 
     status: EstadoRender
     exit_code: int
-    output_path: str | None = None
-    combined_path: str | None = None
+    output_path: RutaRelativa | None = None
+    combined_path: RutaRelativa | None = None
     duration_s: float | None = None
     file_size_bytes: int | None = None
     width: int | None = None
@@ -750,6 +786,12 @@ class RenderResult(Artefacto):
     failed_stage: str | None = None
     # Mensaje corto y saneado. Los logs completos quedan en disco, no aquí.
     error: str | None = None
+    # --- medición del archivo (Gate 5) ---
+    sha256: Sha256Hex | None = None
+    audio_sample_rate_hz: int | None = None
+    pixel_format: str | None = None
+    renderer: str | None = None
+    inspected_with: str | None = None
 
 
 # ---------------------------------------------------------------------------
