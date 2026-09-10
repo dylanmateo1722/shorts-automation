@@ -14,7 +14,7 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [claude/gate-1-core]
+    branches: [claude/gate-1-core, claude/gate-2-linguistic]
   pull_request:
 
 permissions:
@@ -49,6 +49,41 @@ jobs:
 
       - name: Suite de tests
         run: .venv/bin/python -m pytest
+
+      # El pipeline lingüístico se ejercita de punta a punta con el proveedor
+      # falso: sin credenciales, sin red y sin coste. Una llamada real a un
+      # modelo en cada push sería cara y no probaría nada más.
+      - name: Pipeline lingüístico con proveedor falso
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          .venv/bin/python -m app run \
+            --pipeline linguistic \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --run-id "$RUN_ID"
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline linguistic
+          .venv/bin/python -m app run --pipeline linguistic \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/reanudacion.log
+          grep -q "stage=translation event=skip" /tmp/reanudacion.log
+          grep -q "stage=adaptation event=skip" /tmp/reanudacion.log
+
+      - name: Publicar artefactos lingüísticos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-2-linguistic
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runs/*/manifest.json
+            runs/*/transcript.json
+            runs/*/translation.json
+            runs/*/adapted_script.json
 
   integration:
     name: Integración con el motor real

@@ -86,7 +86,12 @@ def test_la_configuracion_publica_no_expone_secretos(entorno_con_secretos, tmp_p
     serializado = json.dumps(publico)
 
     assert not contiene_secreto(serializado)
-    assert set(publico) == {"runs_dir", "mpt_dir", "mpt_timeout_s", "log_level"}
+    assert set(publico) == {
+        "runs_dir", "mpt_dir", "mpt_timeout_s", "log_level",
+        "llm_provider", "llm_model", "target_language", "default_wpm",
+        "translation_prompt_version", "adaptation_prompt_version",
+    }
+    assert "llm_api_key" not in publico
 
 
 def test_el_manifest_no_contiene_secretos(entorno_con_secretos, tmp_path):
@@ -99,6 +104,55 @@ def test_el_manifest_no_contiene_secretos(entorno_con_secretos, tmp_path):
 
     assert not contiene_secreto(contenido)
     assert SECRETO not in contenido
+
+
+def test_la_credencial_del_llm_solo_vive_en_el_entorno(monkeypatch, tmp_path):
+    """No es un campo del dataclass, así que no puede colarse en un repr."""
+    monkeypatch.setenv("LLM_API_KEY", SECRETO)
+    settings = Settings(raiz_proyecto=tmp_path, llm_provider="fake")
+
+    assert settings.llm_api_key == SECRETO
+    assert SECRETO not in repr(settings)
+    assert not contiene_secreto(repr(settings))
+
+
+def test_la_credencial_del_llm_no_llega_al_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_API_KEY", SECRETO)
+    settings = Settings(
+        raiz_proyecto=tmp_path, llm_provider="moonshot", llm_model="k2"
+    )
+    manifest = Manifest(run_id=uuid.uuid4(), config=settings.publico())
+    contenido = manifest.guardar(tmp_path).read_text(encoding="utf-8")
+
+    assert SECRETO not in contenido
+    assert not contiene_secreto(contenido)
+    # El proveedor y el modelo sí se registran: no son secretos y hacen falta
+    # para saber con qué se produjo un artefacto.
+    assert "moonshot" in contenido and "k2" in contenido
+
+
+def test_un_error_del_proveedor_no_filtra_la_credencial(monkeypatch, captura_de_log):
+    """El cuerpo de un 401 puede repetir la clave enviada."""
+    import urllib.error
+
+    from app.adapters.llm.openai_compatible import ProveedorOpenAICompatible
+    from app.core.errors import RespuestaInvalida
+
+    monkeypatch.setenv("LLM_API_KEY", SECRETO)
+    cliente = ProveedorOpenAICompatible(
+        base_url="https://api.ejemplo/v1", api_key=SECRETO, modelo="m", timeout_s=1
+    )
+
+    def falla(peticion, timeout=None):
+        raise urllib.error.HTTPError("u", 401, f"clave {SECRETO} inválida", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", falla)
+    with pytest.raises(RespuestaInvalida) as exc:
+        cliente.generar_json("p")
+
+    obtener_logger().error("fallo del proveedor: %s", exc.value.mensaje)
+    assert SECRETO not in str(exc.value)
+    assert SECRETO not in captura_de_log.getvalue()
 
 
 def test_el_log_del_motor_se_redacta(

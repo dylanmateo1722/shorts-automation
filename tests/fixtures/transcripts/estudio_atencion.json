@@ -1,0 +1,14 @@
+{
+  "schema_version": "1",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "source_language": "en",
+  "text": "Three years ago, researchers at Vega Institute tested a simple idea. They gave 240 volunteers a short daily task. After 12 weeks, 68 percent reported better focus. The team says the effect may fade without practice. Could a five minute habit really change your attention? The data is promising but not conclusive.",
+  "segments": [
+    {"text": "Three years ago, researchers at Vega Institute tested a simple idea."},
+    {"text": "They gave 240 volunteers a short daily task."},
+    {"text": "After 12 weeks, 68 percent reported better focus."},
+    {"text": "The team says the effect may fade without practice."},
+    {"text": "Could a five minute habit really change your attention?"},
+    {"text": "The data is promising but not conclusive."}
+  ]
+}

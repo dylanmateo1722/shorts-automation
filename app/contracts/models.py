@@ -125,11 +125,22 @@ class SourceAsset(Artefacto):
 
 
 class SegmentoTexto(BaseModel):
+    """Un fragmento de texto, con tiempo si la fuente lo aporta.
+
+    Los tiempos son opcionales a propósito: una transcripción puede llegar sin
+    marcas temporales y sigue siendo válida. Rellenarlas con valores estimados
+    sería inventar datos que después se leerían como medidos.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    start_s: float
-    end_s: float
-    text: str
+    text: str = Field(min_length=1)
+    start_s: float | None = None
+    end_s: float | None = None
+
+    @property
+    def tiene_tiempos(self) -> bool:
+        return self.start_s is not None and self.end_s is not None
 
 
 class PalabraTiempo(BaseModel):
@@ -141,53 +152,114 @@ class PalabraTiempo(BaseModel):
 
 
 class Transcript(Artefacto):
-    """Transcripción del audio de origen."""
+    """Transcripción de la fuente.
 
-    language: str
-    segments: list[SegmentoTexto]
+    ``text`` es la representación completa y siempre está presente; los
+    segmentos conservan la estructura temporal solo cuando la fuente la tenía.
+    """
+
+    source_language: str = Field(min_length=2)
+    text: str = Field(min_length=1)
+    segments: list[SegmentoTexto] = Field(default_factory=list)
     words: list[PalabraTiempo] = Field(default_factory=list)
     provenance: ProcedenciaIA | None = None
+
+    @property
+    def tiene_tiempos(self) -> bool:
+        """True si algún segmento aporta marcas temporales reales."""
+        return any(s.tiene_tiempos for s in self.segments)
 
 
 class Translation(Artefacto):
     """Traducción fiel del transcript. Separada de la adaptación a propósito.
 
-    Es el registro de qué decía el original. Sin él no se puede demostrar
-    después qué se transformó.
+    Es el registro de qué decía el original: su objetivo es **preservar el
+    significado**, no mejorarlo. Toda la creatividad pertenece a
+    ``AdaptedScript``. Sin esta separación es imposible demostrar después qué
+    se transformó.
     """
 
-    source_ref: str
-    language: str
-    segments: list[SegmentoTexto]
-    full_text: str
-    provenance: ProcedenciaIA | None = None
+    source_language: str = Field(min_length=2)
+    target_language: str = Field(min_length=2)
+    source_transcript_reference: str
+    text: str = Field(min_length=1)
+    segments: list[SegmentoTexto] = Field(default_factory=list)
+    provenance: ProcedenciaIA
+
+    @property
+    def provider(self) -> str:
+        return self.provenance.provider
+
+    @property
+    def model(self) -> str:
+        return self.provenance.model
+
+    @property
+    def prompt_version(self) -> str | None:
+        return self.provenance.prompt_version
 
 
 class TipoSeccion(str, Enum):
+    """Función narrativa de una sección.
+
+    No todas aparecen en todo Short: un Short puede no tener llamada a la
+    acción, y forzarla produciría relleno.
+    """
+
     hook = "hook"
+    contexto = "context"
     desarrollo = "development"
-    aporte_propio = "own_contribution"
-    cierre = "close"
+    remate = "payoff"
+    llamada_a_accion = "cta"
 
 
 class SeccionGuion(BaseModel):
+    """Una sección del guion adaptado.
+
+    Se usa ``kind`` y no ``type`` por coherencia con ``TransformationElement``,
+    que ya nombra así el mismo concepto.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     kind: TipoSeccion
-    text: str
-    estimated_duration_s: float
+    text: str = Field(min_length=1)
+    order: int = Field(ge=0)
 
 
 class AdaptedScript(Artefacto):
-    """Guion propio en español, derivado de la traducción pero no igual a ella."""
+    """Guion adaptado en español: el artefacto principal de la etapa lingüística.
 
-    hook: str
-    sections: list[SeccionGuion]
-    full_text: str
-    estimated_duration_s: float
+    Deriva de la traducción pero no es igual a ella. Puede reordenar,
+    condensar, simplificar y eliminar redundancias; **no** puede inventar
+    hechos, cifras, nombres ni contexto que la fuente no traía.
+
+    ``estimated_duration_seconds`` es una estimación determinista por palabras
+    por minuto. No equivale a la duración real de una narración sintetizada:
+    esa se medirá cuando exista audio.
+    """
+
+    language: str = Field(min_length=2)
+    hook: str = Field(min_length=1)
+    sections: list[SeccionGuion] = Field(min_length=1)
+    full_text: str = Field(min_length=1)
+    target_duration_seconds: float = Field(gt=0)
+    estimated_duration_seconds: float = Field(ge=0)
     transformation_notes: list[str] = Field(default_factory=list)
-    source_transcript_ref: str | None = None
-    provenance: ProcedenciaIA | None = None
+    source_translation_reference: str | None = None
+    provenance: ProcedenciaIA
+
+    @property
+    def provider(self) -> str:
+        return self.provenance.provider
+
+    @property
+    def model(self) -> str:
+        return self.provenance.model
+
+    @property
+    def prompt_version(self) -> str | None:
+        return self.provenance.prompt_version
 
 
 # ---------------------------------------------------------------------------

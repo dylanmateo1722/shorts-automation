@@ -52,6 +52,9 @@ class EntradaEtapa(BaseModel):
     finished_at: datetime | None = None
     duration_s: float | None = None
     artifacts: list[str] = Field(default_factory=list)
+    # Datos no sensibles de la etapa: proveedor, modelo y versión de prompt
+    # cuando el artefacto lo declara. Nunca credenciales.
+    metadata: dict = Field(default_factory=dict)
     error: dict | None = None
 
 

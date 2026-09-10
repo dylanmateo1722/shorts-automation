@@ -1,7 +1,7 @@
 """CLI del orquestador.
 
-    python -m app run [--run-id UUID] [--force STAGE]
-    python -m app validate <run-id>
+    python -m app run [--pipeline render|linguistic] [--run-id UUID] [--force STAGE]
+    python -m app validate <run-id> [--pipeline render|linguistic]
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -18,7 +18,13 @@ from app.config.settings import Settings
 from app.core.errors import ErrorPipeline
 from app.core.logging import configurar_logging
 from app.core.run_id import nuevo_run_id, parsear_run_id
-from app.pipeline.core import ejecutar_run, validar_run
+from app.pipeline.core import construir_pipeline, ejecutar_run, validar_run
+from app.pipeline.linguistic import construir_pipeline_linguistico
+
+PIPELINES = {
+    "render": construir_pipeline,
+    "linguistic": construir_pipeline_linguistico,
+}
 
 
 def _construir_parser() -> argparse.ArgumentParser:
@@ -28,6 +34,18 @@ def _construir_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="comando", required=True)
 
     ejecutar = sub.add_parser("run", help="ejecuta o reanuda una corrida")
+    ejecutar.add_argument(
+        "--pipeline", choices=sorted(PIPELINES), default="render",
+        help="secuencia a ejecutar (por defecto: render, el de Gate 1)",
+    )
+    ejecutar.add_argument(
+        "--transcript", default=None, metavar="RUTA",
+        help="transcript JSON de partida; obligatorio para --pipeline linguistic",
+    )
+    ejecutar.add_argument(
+        "--target-duration", type=float, default=None, metavar="SEGUNDOS",
+        help="duración objetivo del guion adaptado (por defecto: 45)",
+    )
     ejecutar.add_argument(
         "--run-id",
         default=None,
@@ -40,6 +58,10 @@ def _construir_parser() -> argparse.ArgumentParser:
 
     validar = sub.add_parser("validate", help="revalida los artefactos de una corrida")
     validar.add_argument("run_id", help="UUID de la corrida")
+    validar.add_argument(
+        "--pipeline", choices=sorted(PIPELINES), default="render",
+        help="secuencia con la que se validan los artefactos",
+    )
 
     return parser
 
@@ -52,14 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     configurar_logging(getattr(logging, settings.log_level, logging.INFO))
 
     try:
+        etapas = PIPELINES[args.pipeline]()
+
         if args.comando == "run":
             run_id = parsear_run_id(args.run_id) if args.run_id else nuevo_run_id()
-            resultado = ejecutar_run(run_id, settings, forzar=args.force)
+            parametros = {}
+            if args.transcript:
+                parametros["transcript_path"] = args.transcript
+            if args.target_duration is not None:
+                parametros["target_duration_seconds"] = args.target_duration
+            resultado = ejecutar_run(
+                run_id, settings, forzar=args.force,
+                parametros=parametros, etapas=etapas,
+            )
             print(str(run_id))
             return 0 if resultado.exito else 1
 
         run_id = parsear_run_id(args.run_id)
-        ok, problemas = validar_run(run_id, settings)
+        ok, problemas = validar_run(run_id, settings, etapas=etapas)
         if ok:
             print(f"{run_id}: artefactos válidos")
             return 0

@@ -22,6 +22,13 @@ RAIZ_PROYECTO = Path(__file__).resolve().parent.parent.parent
 
 SUBDIR_MPT = Path("vendor/moneyprinterturbo")
 SUBDIR_RUNS = Path("runs")
+SUBDIR_PROMPTS = Path("prompts")
+
+# Palabras por minuto de la narración, medidas en Gate 0.5: 60 palabras en
+# 30,29 s con la voz es-CR-JuanNeural de Edge TTS. Es una sola muestra con una
+# sola voz, así que sirve para estimar y no para prometer: la duración real se
+# medirá cuando exista audio.
+WPM_POR_DEFECTO = 119
 
 
 def _entero(nombre: str, por_defecto: int) -> int:
@@ -46,6 +53,21 @@ class Settings:
     mpt_timeout_s: int = 1800
     log_level: str = "INFO"
 
+    # --- capa lingüística ---
+    llm_provider: str = ""
+    llm_model: str = ""
+    llm_base_url: str = ""
+    llm_timeout_s: int = 120
+    target_language: str = "es"
+    default_wpm: int = WPM_POR_DEFECTO
+    translation_prompt_version: str = "v1"
+    adaptation_prompt_version: str = "v1"
+    # Margen aceptable alrededor de la duración objetivo, en tanto por uno.
+    duration_tolerance: float = 0.25
+    # Intentos de condensación cuando el guion sale largo. Acotado a propósito:
+    # cada intento es una llamada al modelo y cuesta dinero.
+    max_condensation_attempts: int = 2
+
     @classmethod
     def desde_entorno(cls) -> "Settings":
         """Construye la configuración leyendo el entorno."""
@@ -56,6 +78,18 @@ class Settings:
             raiz_mpt=Path(os.environ.get("SHORTS_MPT_DIR", raiz / SUBDIR_MPT)),
             mpt_timeout_s=_entero("SHORTS_MPT_TIMEOUT_S", 1800),
             log_level=os.environ.get("SHORTS_LOG_LEVEL", "INFO").upper(),
+            llm_provider=os.environ.get("LLM_PROVIDER", "").strip(),
+            llm_model=os.environ.get("LLM_MODEL", "").strip(),
+            llm_base_url=os.environ.get("LLM_BASE_URL", "").strip(),
+            llm_timeout_s=_entero("LLM_TIMEOUT_S", 120),
+            target_language=os.environ.get("TARGET_LANGUAGE", "es").strip(),
+            default_wpm=_entero("DEFAULT_WPM", WPM_POR_DEFECTO),
+            translation_prompt_version=os.environ.get(
+                "TRANSLATION_PROMPT_VERSION", "v1"
+            ).strip(),
+            adaptation_prompt_version=os.environ.get(
+                "ADAPTATION_PROMPT_VERSION", "v1"
+            ).strip(),
         )
 
     # --- MoneyPrinterTurbo -------------------------------------------------
@@ -91,6 +125,34 @@ class Settings:
                 f"{self.python_mpt}; ejecuta scripts/setup_mpt.sh"
             )
 
+    @property
+    def raiz_prompts(self) -> Path:
+        return self.raiz_proyecto / SUBDIR_PROMPTS
+
+    @property
+    def llm_api_key(self) -> str:
+        """Credencial del proveedor. **Solo** desde el entorno.
+
+        Es una propiedad y no un campo del dataclass para que no pueda acabar
+        por descuido en un ``repr``, en un volcado del manifest ni en un log.
+        """
+        return os.environ.get("LLM_API_KEY", "")
+
+    def verificar_llm(self) -> None:
+        """Comprueba que hay proveedor configurado antes de gastar en llamadas.
+
+        Raises:
+            ConfiguracionInvalida: nombrando la variable que falta.
+        """
+        if not self.llm_provider:
+            raise ConfiguracionInvalida(
+                "falta LLM_PROVIDER; configúralo en .env o en el entorno"
+            )
+        if self.default_wpm <= 0:
+            raise ConfiguracionInvalida(
+                f"DEFAULT_WPM debe ser mayor que cero; recibido {self.default_wpm}"
+            )
+
     # --- manifest ----------------------------------------------------------
 
     def publico(self) -> dict:
@@ -104,6 +166,12 @@ class Settings:
             "mpt_dir": self._relativa(self.raiz_mpt),
             "mpt_timeout_s": self.mpt_timeout_s,
             "log_level": self.log_level,
+            "llm_provider": self.llm_provider,
+            "llm_model": self.llm_model,
+            "target_language": self.target_language,
+            "default_wpm": self.default_wpm,
+            "translation_prompt_version": self.translation_prompt_version,
+            "adaptation_prompt_version": self.adaptation_prompt_version,
         }
 
     def _relativa(self, ruta: Path) -> str:

@@ -79,6 +79,23 @@ class ArtefactoCorrupto(ErrorPermanente):
     """Un artefacto existe pero no puede leerse o no valida."""
 
 
+class RespuestaInvalida(ErrorPermanente):
+    """El proveedor respondió, pero la respuesta no es utilizable.
+
+    JSON mal formado, esquema incorrecto o contenido incompleto. Reintentarlo
+    a ciegas, como si fuera un fallo de red, suele repetir el mismo resultado
+    y cuesta dinero.
+    """
+
+
+class ContenidoInvalido(ErrorPermanente):
+    """La respuesta es estructuralmente válida pero no cumple el contenido.
+
+    Idioma equivocado, cifras alteradas, datos inventados o duración
+    imposible. Es un problema de contenido, no de transporte.
+    """
+
+
 class LicenciaDenegada(ErrorPermanente):
     """La fuente no puede usarse. No es un fallo: es una decisión."""
 

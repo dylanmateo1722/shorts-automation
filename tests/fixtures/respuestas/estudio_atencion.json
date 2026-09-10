@@ -1,0 +1,27 @@
+[
+  {
+    "text": "Hace tres años, un equipo del Instituto Vega puso a prueba una idea sencilla. Dieron a 240 voluntarios una tarea diaria breve. Al cabo de 12 semanas, el 68 por ciento dijo concentrarse mejor. El equipo señala que el efecto puede desvanecerse sin práctica. ¿Podría un hábito de cinco minutos cambiar de verdad tu atención? Los datos son prometedores, pero no concluyentes.",
+    "segments": [
+      "Hace tres años, un equipo del Instituto Vega puso a prueba una idea sencilla.",
+      "Dieron a 240 voluntarios una tarea diaria breve.",
+      "Al cabo de 12 semanas, el 68 por ciento dijo concentrarse mejor.",
+      "El equipo señala que el efecto puede desvanecerse sin práctica.",
+      "¿Podría un hábito de cinco minutos cambiar de verdad tu atención?",
+      "Los datos son prometedores, pero no concluyentes."
+    ]
+  },
+  {
+    "hook": "¿Cinco minutos al día pueden cambiar tu atención?",
+    "sections": [
+      {"kind": "hook", "text": "¿Cinco minutos al día pueden cambiar tu atención?", "order": 0},
+      {"kind": "context", "text": "Un equipo del Instituto Vega lo puso a prueba.", "order": 1},
+      {"kind": "development", "text": "Dieron a 240 voluntarios una tarea diaria breve. A las 12 semanas, el 68 por ciento decía concentrarse mejor.", "order": 2},
+      {"kind": "payoff", "text": "El propio equipo avisa: puede desvanecerse sin práctica. Los datos son prometedores, no concluyentes.", "order": 3}
+    ],
+    "notes": [
+      "Se adelanta la pregunta al inicio para que funcione como gancho.",
+      "Se parten las frases largas para que quepan en dos líneas de subtítulo.",
+      "Se conservan las tres cifras del original: 240, 12 y 68."
+    ]
+  }
+]

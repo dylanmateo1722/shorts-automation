@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +28,22 @@ from app.core.workspace import Workspace
 
 def _ahora() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _procedencia(artefacto: Artefacto) -> dict:
+    """Extrae proveedor, modelo y versión de prompt de un artefacto de IA.
+
+    Se hace aquí y no en cada etapa para que ninguna pueda olvidarlo: sin esa
+    información una salida de modelo no es reproducible ni auditable.
+    """
+    procedencia = getattr(artefacto, "provenance", None)
+    if procedencia is None:
+        return {}
+    return {
+        "provider": procedencia.provider,
+        "model": procedencia.model,
+        "prompt_version": procedencia.prompt_version,
+    }
 
 
 @dataclass(frozen=True)
@@ -59,6 +75,13 @@ class ContextoEtapa:
     manifest: Manifest
     settings: object
     previos: dict[str, Artefacto]
+    # Entradas de la corrida que no son artefactos de una etapa previa: la
+    # ruta de un transcript de partida, la duración objetivo, etc.
+    parametros: dict = field(default_factory=dict)
+    # Objetos caros de construir que deben vivir una sola vez por corrida,
+    # como un cliente de proveedor. Se comparte por referencia entre etapas:
+    # construir uno por etapa reinicia su estado y multiplica conexiones.
+    recursos: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -72,11 +95,19 @@ class ResultadoEtapa:
 class StageRunner:
     """Ejecuta etapas aplicando idempotencia y dejando rastro en el manifest."""
 
-    def __init__(self, workspace: Workspace, manifest: Manifest, settings: object) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        manifest: Manifest,
+        settings: object,
+        parametros: dict | None = None,
+    ) -> None:
         self.workspace = workspace
         self.manifest = manifest
         self.settings = settings
+        self.parametros = parametros or {}
         self.producidos: dict[str, Artefacto] = {}
+        self.recursos: dict = {}
 
     # --- idempotencia ------------------------------------------------------
 
@@ -116,6 +147,7 @@ class StageRunner:
                 entrada.status = EstadoEtapa.omitida
                 entrada.finished_at = _ahora()
                 entrada.error = None
+                entrada.metadata = _procedencia(existente)
                 if etapa.artefacto not in entrada.artifacts:
                     entrada.artifacts.append(etapa.artefacto)
                 self._registrar_artefacto(etapa.artefacto)
@@ -137,6 +169,8 @@ class StageRunner:
                 manifest=self.manifest,
                 settings=self.settings,
                 previos=dict(self.producidos),
+                parametros=dict(self.parametros),
+                recursos=self.recursos,
             )
             artefacto = etapa.ejecutar(contexto)
         except ErrorPipeline as exc:
@@ -158,6 +192,7 @@ class StageRunner:
         entrada.status = EstadoEtapa.completada
         entrada.finished_at = _ahora()
         entrada.duration_s = round(duracion, 3)
+        entrada.metadata = _procedencia(artefacto)
         if etapa.artefacto not in entrada.artifacts:
             entrada.artifacts.append(etapa.artefacto)
         self._registrar_artefacto(etapa.artefacto)
