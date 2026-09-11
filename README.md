@@ -18,8 +18,9 @@ configuración ni historial con ese repositorio.
 | Gate 3 | TTS, WordBoundaries y subtítulos (SRT + ASS) | Aprobado |
 | Gate 4 | Procedencia, transformación editorial y QA técnica | Aprobado |
 | Gate 5 | MVP de extremo a extremo: composición y MP4 final | Aprobado |
-| **Gate 6** | **Fuentes, evidencia y decisiones de licencia** | **En verificación** |
-| Gate 7+ | Discovery, análisis de competencia, publicación | No iniciado |
+| Gate 6 | Fuentes, evidencia y decisiones de licencia | Aprobado |
+| **Gate 7** | **Publicación: contratos y máquina de estados** | **Contratos formalizados; sin implementar** |
+| Gate 8+ | Discovery, análisis de competencia, publicación real | No iniciado |
 
 Con Gate 5 el pipeline produce un **Short vertical real**: 1080×1920, H.264,
 AAC, con narración, subtítulos y rótulo propios, validado sobre el archivo.
@@ -30,8 +31,13 @@ versionada, y **nada llega al motor sin una decisión que lo autorice**.
 `render_allowed` significa que la política técnica lo permite — **no** que algo
 esté certificado legalmente.
 
-**No hay** Discovery, ni scraping, ni análisis de competencia, ni integración con
-YouTube, ni publicación, ni planificación.
+Gate 7 formaliza los contratos de publicación y su máquina de estados: qué se
+quiere publicar, por dónde va una ejecución y qué devolvió YouTube, con las
+transiciones válidas declaradas y las inválidas rechazadas. **Formalizado no es
+implementado:** no hay cliente de YouTube, ni OAuth, ni subida.
+
+**No hay** Discovery, ni scraping, ni análisis de competencia, ni publicación real,
+ni planificación.
 
 ## Arquitectura actual
 
@@ -784,10 +790,10 @@ descubrimiento. Cuando Discovery exista, producirá `SourceAsset` que entrarán 
 esta misma cadena: la clase la seguirá decidiendo la política, nunca el hecho de
 haber encontrado algo.
 
-**YouTube.** No hay API, ni OAuth, ni tokens, ni subida, ni metadatos de
-publicación, ni programación. Tampoco hay —ni se planea aquí— clasificador de uso
-legítimo, clasificador de copyright, clasificador de monetización, detección de
-similitud ni nada que pretenda anticipar Content ID.
+**YouTube.** Gate 7 formaliza los contratos y la máquina de estados (ver abajo),
+pero no hay API, ni OAuth, ni tokens, ni subida. Tampoco hay —ni se planea aquí—
+clasificador de uso legítimo, clasificador de copyright, clasificador de
+monetización, detección de similitud ni nada que pretenda anticipar Content ID.
 
 **Qué sigue necesitando una persona.** La política decide si el pipeline *puede*
 utilizar técnicamente un recurso. No decide si *debe*: eso es el juicio editorial
@@ -796,6 +802,176 @@ que quede en `needs_review` espera a alguien, por diseño.
 
 En lo visual queda el estilo de producción: material propio de verdad en lugar
 del degradado, y resolver la redundancia entre rótulo y primer subtítulo.
+
+## Publicación: contratos y máquina de estados
+
+Esta parte está **formalizada, no implementada**. Existen los contratos y la
+máquina de estados; no existe el cliente de YouTube. Los límites exactos están al
+final de la sección.
+
+### Tres contratos que no se solapan
+
+```
+PublishMetadata ──→ PublishJob ──→ PublishResult
+qué se quiere        por dónde va     qué devolvió
+publicar             la ejecución     YouTube
+(intención)          (operacional)    (hecho observado)
+```
+
+La separación no es ornamental. Si la metadata llevara el `video_id`, un reintento
+sobreescribiría la intención; si el trabajo llevara el título, un reintento podría
+contradecirla. Los contratos **se niegan a validar** si los datos de uno aparecen
+en otro, y hay tests que lo comprueban campo por campo.
+
+| | `PublishMetadata` | `PublishJob` | `PublishResult` |
+|---|---|---|---|
+| Qué es | intención editorial | estado operacional | hecho observado |
+| Cuándo se escribe | antes de que exista el vídeo | durante la ejecución | cuando YouTube contesta |
+| Lleva `video_id` | **no** | no | sí, cuando existe |
+| Lleva título | sí | **no** | **no** |
+| Lleva `state`/`status` | no | `state` | `status` |
+
+`privacy_status` aparece en la metadata **y** en el resultado a propósito: son lo
+solicitado y lo observado, y compararlos es en qué consiste verificar.
+
+### Divulgación de IA
+
+`ai_disclosure` es un objeto dentro de `PublishMetadata`, con tres estados:
+
+| Estado | Significa | ¿Deja publicar automáticamente? |
+|---|---|---|
+| `not_required` | no hace falta declarar nada | sí |
+| `required` | hay que declararlo, y se declara | sí |
+| `requires_current_verification` | hay que volver a comprobar la situación | **no** |
+
+**El sistema no deduce ninguno de los tres.** Que la narración venga de un TTS no
+determina por sí solo que haga falta divulgación: eso depende de la pieza y de la
+norma aplicable, y es una valoración humana. El contrato exige `reason` y
+`decided_by` porque una divulgación sin constancia de por qué y de quién la decidió
+sería indistinguible de un valor por defecto — que es justo lo que aquí no debe
+existir.
+
+`requires_current_verification` bloquea estructuralmente: entrar en `UPLOADING`
+exige presentar la metadata, y la transición se rechaza si la divulgación está en
+ese estado. Sin metadata tampoco se pasa, porque entonces no habría forma de
+comprobarlo y concederlo por omisión sería el error.
+
+### Los ocho estados
+
+| Estado | Qué significa |
+|---|---|
+| `NOT_READY` | el artefacto no cumple las condiciones para publicar |
+| `READY` | QA, procedencia, metadata y demás precondiciones están satisfechas |
+| `UPLOADING` | subida en curso |
+| `UPLOADED` | YouTube devolvió un `video_id` válido |
+| `VERIFYING` | se está comprobando que el recurso remoto coincide con lo solicitado |
+| `COMPLETED` | verificado: el estado remoto coincide con el solicitado |
+| `FAILED` | fallo determinista que **no** debe reintentarse automáticamente |
+| `NEEDS_REVIEW` | ambiguo, inconsistente o pendiente de intervención humana |
+
+### `COMPLETED` no significa público
+
+Es la confusión más fácil de cometer y la que saldría más caro. `COMPLETED`
+significa que lo subido se verificó y el estado remoto coincide con el solicitado.
+Un vídeo `private` verificado está `COMPLETED`. El estado de la publicación y la
+visibilidad del vídeo son dos ejes distintos.
+
+### Transiciones
+
+```
+                    ┌──────────────────────────────────────────┐
+                    ▼                                          │
+NOT_READY ──→ READY ──→ UPLOADING ──→ UPLOADED ──→ VERIFYING ──→ COMPLETED
+    │           │           │             │            │
+    │           │           │             │            ├──→ FAILED
+    │           │           ├──→ FAILED   │            │
+    ▼           ▼           ▼             ▼            ▼
+         NEEDS_REVIEW ◄──────────────────────────────────
+              │
+              ├──→ VERIFYING   (reconciliar: ir a mirar el remoto)
+              └──→ FAILED      (concluir que falló)
+```
+
+| Desde | Hacia |
+|---|---|
+| `NOT_READY` | `READY`, `NEEDS_REVIEW` |
+| `READY` | `UPLOADING`, `NOT_READY`, `NEEDS_REVIEW` |
+| `UPLOADING` | `UPLOADED`, `FAILED`, `NEEDS_REVIEW` |
+| `UPLOADED` | `VERIFYING`, `NEEDS_REVIEW` |
+| `VERIFYING` | `COMPLETED`, `FAILED`, `NEEDS_REVIEW` |
+| `NEEDS_REVIEW` | `VERIFYING`, `FAILED` |
+| `COMPLETED` | — (terminal) |
+| `FAILED` | — (terminal) |
+
+Lo que no está en la tabla se rechaza, incluido quedarse en el mismo estado. Hay
+un test parametrizado sobre **las 49 transiciones inválidas** de las 64 posibles.
+
+Cuatro ausencias que son decisiones, no olvidos:
+
+- **`UPLOADING` no vuelve a `READY`.** Ver el apartado siguiente.
+- **`NEEDS_REVIEW` no vuelve a `READY`.** Sería autorizar otra subida sin haber
+  averiguado si la anterior llegó.
+- **`READY` no va directo a `FAILED`.** Un fallo determinista existe cuando ya
+  hubo trato con YouTube; antes de eso, lo que hay es una precondición sin cumplir
+  (`NOT_READY`) o una ambigüedad (`NEEDS_REVIEW`).
+- **`FAILED` y `COMPLETED` no salen a ningún sitio.** Retomar un `FAILED` no es
+  transitar: es una ejecución nueva, con su propio `attempt` y su propia clave.
+
+### Idempotencia, y el caso de la respuesta perdida
+
+**YouTube no ofrece ninguna clave de idempotencia genérica que podamos asumir.**
+`idempotency_key` es nuestra: se deriva del `run_id`, sirve para reconocer que dos
+intentos hablan de la misma publicación, y **no hace nada del lado de YouTube**.
+Mandarla no evita un duplicado porque no hay a quién mandarla.
+
+La idempotencia real se apoya en tres cosas: el `run_id`, el estado persistido y la
+reconciliación posterior.
+
+De ahí el caso que define el diseño:
+
+> La subida empezó. Puede haber terminado. La respuesta se perdió.
+
+Volver a subir a ciegas publicaría el vídeo dos veces, y eso no se deshace. Por eso
+desde `UPLOADING` la máquina **no permite volver a `READY`**: el único camino es
+`NEEDS_REVIEW` y, desde ahí, `VERIFYING` para ir a comprobar qué hay en el remoto.
+`attempt` no se incrementa por pasar a `NEEDS_REVIEW`, porque no se ha hecho un
+intento nuevo.
+
+`attempt` cuenta subidas empezadas, no transiciones: vale 0 mientras no se haya
+entrado en `UPLOADING`, y el contrato lo exige — un trabajo `UPLOADED` con 0
+intentos describiría algo imposible.
+
+### Invariantes del resultado
+
+- **`COMPLETED` exige `video_id`** y `completed_at`: no se puede dar por completada
+  una publicación sin constancia de qué se publicó.
+- **`FAILED` no exige `video_id`**: un fallo puede ocurrir antes de que YouTube
+  devuelva nada. Tampoco lo prohíbe, porque puede fallar después.
+- **`NEEDS_REVIEW` no afirma que el upload fallara.** Es el estado de lo que hay
+  que ir a comprobar, con o sin `video_id`.
+- Un `video_id` va siempre con su `uploaded_at` y su `url`; uno sin los otros deja
+  el resultado a medio describir.
+- Un `completed_at` con un estado que no sea `COMPLETED` es una contradicción.
+- `NOT_READY`, `READY` y `UPLOADING` **no pueden ser el estado de un resultado**:
+  describen por dónde va el trabajo, no qué contestó YouTube.
+
+El contrato no valida la forma de `url`: construirla o comprobarla sería afirmar un
+esquema de URLs de YouTube que este Gate todavía no utiliza.
+
+### Límites explícitos de esta fase
+
+Formalizado: los tres contratos, los enums, la máquina de estados, las
+transiciones, los invariantes y la derivación de la clave de idempotencia.
+
+**No implementado, y no simulado:** cliente de la API de YouTube, OAuth, refresco
+de tokens, subida, subida reanudable, publicación real, programación y Discovery.
+No hay credenciales en el repositorio, no hay credenciales ficticias que parezcan
+funcionales y ningún contrato de publicación tiene un campo donde pudiera guardarse
+un token — hay un test que recorre los cuatro modelos para comprobarlo.
+
+El primer flujo real usará `privacy_status = private`. El contrato admite
+`unlisted` y `public` porque la intención es representable, no porque ya exista
+política para ellos.
 
 ## Ejecutar una corrida
 

@@ -42,6 +42,11 @@ SCHEMA_VERSION_VOZ = "1.0"
 # obligar a reescribir el de procedencia.
 SCHEMA_VERSION_TRANSFORMACION = "1.0"
 
+# Los de publicación, igual. Empiezan en "1.0" porque los contratos de Gate 1 que
+# llevaban estos nombres nunca se produjeron ni se consumieron: no hay artefactos
+# persistidos con el esquema anterior que una versión nueva tuviera que distinguir.
+SCHEMA_VERSION_PUBLICACION = "1.0"
+
 # Reglas de legibilidad del subtítulo, fijadas por el contrato. Son una
 # heurística inicial —no una garantía de que ningún cue pase de 32 caracteres—
 # y cambiarlas es evolucionar el schema, no reconfigurar una corrida.
@@ -1191,28 +1196,433 @@ class QAResult(ArtefactoTransformacion):
         )
 
 
-class PublishMetadata(Artefacto):
-    """Metadatos de publicación. Ciclo de vida distinto al del guion."""
+# ---------------------------------------------------------------------------
+# Publicación: intención, estado operacional y resultado
+#
+# Tres contratos con tres responsabilidades que no se solapan:
+#
+#   PublishMetadata  qué se quiere publicar          (intención editorial)
+#   PublishJob       por dónde va una ejecución      (estado operacional)
+#   PublishResult    qué devolvió YouTube            (hecho observado)
+#
+# La separación no es ornamental. Mezclarlas haría que un reintento sobreescribiera
+# la intención, o que la intención pareciera un hecho. Los contratos se niegan a
+# validar si los datos de uno aparecen en otro.
+# ---------------------------------------------------------------------------
 
-    title: str = Field(max_length=100)
+
+class Privacidad(str, Enum):
+    """Visibilidad solicitada para el vídeo en YouTube.
+
+    El conjunto es cerrado. ``private`` es el único que usa el primer flujo real;
+    los otros dos existen en el contrato porque la intención es representable,
+    no porque ya haya política para ellos.
+    """
+
+    privado = "private"
+    no_listado = "unlisted"
+    publico = "public"
+
+
+class EstadoDivulgacionIA(str, Enum):
+    """Qué hace falta declarar sobre el uso de IA en la pieza.
+
+    Ninguno de los tres lo deduce el sistema. Que una narración venga de un TTS
+    **no** determina por sí solo que haga falta divulgación: eso depende de la
+    pieza y de la norma aplicable, y esa valoración es humana. El contrato
+    registra la decisión y quién la tomó; no la calcula.
+
+    ``requires_current_verification`` es el estado que bloquea: significa que la
+    situación debe comprobarse de nuevo antes de publicar, y por tanto la
+    publicación automática no puede seguir adelante.
+    """
+
+    requerida = "required"
+    no_requerida = "not_required"
+    requiere_verificacion_actual = "requires_current_verification"
+
+
+class DivulgacionIA(BaseModel):
+    """La decisión de divulgación, registrada con su motivo y su autor.
+
+    ``reason`` y ``decided_by`` son obligatorios a propósito: una divulgación sin
+    constancia de por qué y de quién la decidió sería indistinguible de un valor
+    por defecto, y el valor por defecto es justo lo que aquí no debe existir.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: EstadoDivulgacionIA
+    reason: TextoNoVacio
+    decided_by: TextoNoVacio
+    decided_at: datetime = Field(default_factory=_ahora)
+
+    @property
+    def permite_publicacion_automatica(self) -> bool:
+        """False cuando la situación debe verificarse antes de publicar."""
+        return self.status is not EstadoDivulgacionIA.requiere_verificacion_actual
+
+
+class EstadoPublicacion(str, Enum):
+    """Los ocho estados por los que puede pasar una publicación.
+
+    Los valores van en mayúsculas, como los de ``EstadoEvaluacion``, porque así
+    los nombra la arquitectura de este Gate. No coinciden en forma con los de
+    ``ClaseFuente`` y eso es deliberado, no un descuido: son vocabularios de dos
+    dominios distintos.
+
+    ``COMPLETED`` merece una aclaración porque es la confusión más fácil de
+    cometer: significa que lo subido se verificó y el estado remoto coincide con
+    el solicitado. **No** significa que el vídeo sea público. Un vídeo
+    ``private`` verificado está ``COMPLETED``.
+    """
+
+    no_listo = "NOT_READY"
+    listo = "READY"
+    subiendo = "UPLOADING"
+    subido = "UPLOADED"
+    verificando = "VERIFYING"
+    completado = "COMPLETED"
+    fallido = "FAILED"
+    revision_pendiente = "NEEDS_REVIEW"
+
+
+#: Transiciones permitidas. Lo que no está aquí se rechaza: la tabla es la
+#: definición, no una sugerencia.
+#:
+#: Dos ausencias que son decisiones, no olvidos:
+#:
+#: * **``UPLOADING`` no vuelve a ``READY``.** Si el upload se quedó sin respuesta
+#:   no se sabe si terminó, y volver a ``READY`` permitiría subirlo otra vez a
+#:   ciegas. Ese camino lleva a ``NEEDS_REVIEW``, que es donde se reconcilia.
+#: * **``FAILED`` y ``COMPLETED`` no salen a ningún sitio.** Son terminales.
+#:   Retomar un ``FAILED`` no es transitar: es una ejecución nueva, con su propio
+#:   ``attempt`` y su propia clave.
+TRANSICIONES_PUBLICACION: dict[EstadoPublicacion, frozenset[EstadoPublicacion]] = {
+    EstadoPublicacion.no_listo: frozenset(
+        {EstadoPublicacion.listo, EstadoPublicacion.revision_pendiente}
+    ),
+    EstadoPublicacion.listo: frozenset(
+        {
+            EstadoPublicacion.subiendo,
+            # Una precondición que deja de cumplirse devuelve el trabajo a
+            # NOT_READY; seguir en READY afirmaría algo que ya no es cierto.
+            EstadoPublicacion.no_listo,
+            EstadoPublicacion.revision_pendiente,
+        }
+    ),
+    EstadoPublicacion.subiendo: frozenset(
+        {
+            EstadoPublicacion.subido,
+            EstadoPublicacion.fallido,
+            EstadoPublicacion.revision_pendiente,
+        }
+    ),
+    EstadoPublicacion.subido: frozenset(
+        {EstadoPublicacion.verificando, EstadoPublicacion.revision_pendiente}
+    ),
+    EstadoPublicacion.verificando: frozenset(
+        {
+            EstadoPublicacion.completado,
+            EstadoPublicacion.fallido,
+            EstadoPublicacion.revision_pendiente,
+        }
+    ),
+    # Salir de NEEDS_REVIEW pasa por volver a mirar el recurso remoto, o por
+    # concluir que falló. No se vuelve a READY: sería autorizar otra subida sin
+    # haber averiguado si la anterior llegó.
+    EstadoPublicacion.revision_pendiente: frozenset(
+        {EstadoPublicacion.verificando, EstadoPublicacion.fallido}
+    ),
+    EstadoPublicacion.completado: frozenset(),
+    EstadoPublicacion.fallido: frozenset(),
+}
+
+#: Estados desde los que no se sale.
+ESTADOS_TERMINALES = frozenset(
+    {EstadoPublicacion.completado, EstadoPublicacion.fallido}
+)
+
+#: Estados en los que ya hubo trato con YouTube, y que por tanto puede llevar un
+#: ``PublishResult``. ``NOT_READY``, ``READY`` y ``UPLOADING`` describen por dónde
+#: va el trabajo, no qué contestó YouTube, así que no son resultados.
+ESTADOS_DE_RESULTADO = frozenset(
+    {
+        EstadoPublicacion.subido,
+        EstadoPublicacion.verificando,
+        EstadoPublicacion.completado,
+        EstadoPublicacion.fallido,
+        EstadoPublicacion.revision_pendiente,
+    }
+)
+
+#: Estados que implican que al menos un intento de subida empezó.
+ESTADOS_CON_INTENTO = frozenset(
+    {
+        EstadoPublicacion.subiendo,
+        EstadoPublicacion.subido,
+        EstadoPublicacion.verificando,
+        EstadoPublicacion.completado,
+        EstadoPublicacion.fallido,
+    }
+)
+
+
+def transicion_valida(
+    origen: EstadoPublicacion, destino: EstadoPublicacion
+) -> bool:
+    """Si la tabla permite pasar de un estado al otro."""
+    return destino in TRANSICIONES_PUBLICACION[origen]
+
+
+def exigir_transicion(
+    origen: EstadoPublicacion,
+    destino: EstadoPublicacion,
+    *,
+    metadata: "PublishMetadata | None" = None,
+) -> None:
+    """Rechaza una transición que la tabla no contempla.
+
+    Para entrar en ``UPLOADING`` hay que presentar la metadata, y no por
+    formalismo: es donde se comprueba que la divulgación de IA no exige volver a
+    verificar la situación. Sin metadata no hay forma de comprobarlo, así que la
+    transición se rechaza en vez de concederse por omisión.
+    """
+    if not transicion_valida(origen, destino):
+        permitidos = sorted(e.value for e in TRANSICIONES_PUBLICACION[origen])
+        raise ValueError(
+            f"transición no permitida {origen.value!r} -> {destino.value!r}; "
+            f"desde {origen.value!r} solo se puede pasar a {permitidos or 'ningún estado'}"
+        )
+
+    if destino is not EstadoPublicacion.subiendo:
+        return
+
+    if metadata is None:
+        raise ValueError(
+            "no se puede pasar a 'UPLOADING' sin la metadata: hay que comprobar "
+            "la divulgación de IA antes de subir"
+        )
+    if not metadata.ai_disclosure.permite_publicacion_automatica:
+        raise ValueError(
+            "la divulgación de IA está en 'requires_current_verification': la "
+            "publicación automática queda bloqueada hasta que una persona "
+            "verifique la situación"
+        )
+
+
+def clave_idempotencia(run_id: UUID) -> str:
+    """Clave determinista de esta ejecución de publicación, derivada del run.
+
+    **YouTube no ofrece ninguna clave de idempotencia que podamos usar.** Esta es
+    nuestra, sirve para reconocer que dos intentos hablan de la misma publicación
+    y no hace absolutamente nada del lado de YouTube: mandarla no evita un
+    duplicado. La idempotencia real se apoya en el estado persistido y en la
+    reconciliación posterior, no en este valor.
+    """
+    return hashlib.sha256(f"publish:{run_id}".encode("utf-8")).hexdigest()
+
+
+class PublishMetadata(Artefacto):
+    """Qué se quiere publicar. Intención, no resultado.
+
+    Aquí no hay ``video_id``, ni URL, ni estado de subida, ni fechas de subida o
+    de finalización: todo eso son hechos que YouTube devuelve y viven en
+    ``PublishResult``. La metadata se puede escribir antes de que exista el vídeo
+    y sigue siendo válida después; confundirla con el resultado haría que un
+    reintento pisara la intención.
+
+    ``made_for_kids`` no tiene valor por defecto **a propósito**. Es una
+    declaración con consecuencias y nadie puede hacerla en nombre de otro: poner
+    ``False`` por omisión sería afirmar algo que nadie decidió.
+    """
+
+    schema_version: str = SCHEMA_VERSION_PUBLICACION
+
+    title: str = Field(min_length=1, max_length=100)
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     category_id: str | None = None
+    privacy_status: Privacidad = Privacidad.privado
     language: str = "es"
-    privacy_status: Literal["private", "unlisted", "public"] = "private"
-    publish_at: datetime | None = None
-    # La decisión de divulgación no se automatiza; solo se registra.
-    synthetic_disclosure: dict = Field(
-        default_factory=lambda: {"decision": "UNDECIDED", "basis": None}
-    )
-    provenance: ProcedenciaIA | None = None
+    made_for_kids: bool
+    ai_disclosure: DivulgacionIA
+
+    @property
+    def permite_publicacion_automatica(self) -> bool:
+        """Si la divulgación registrada deja publicar sin intervención humana."""
+        return self.ai_disclosure.permite_publicacion_automatica
+
+
+class PublishJob(Artefacto):
+    """Por dónde va una ejecución de publicación. Estado operacional.
+
+    No lleva metadata editorial: el título y la descripción viven en
+    ``PublishMetadata``, y duplicarlos aquí haría que un reintento pudiera
+    contradecir la intención original.
+
+    ``attempt`` cuenta las subidas empezadas, no las transiciones. Vale 0
+    mientras no se haya entrado en ``UPLOADING``, y el contrato lo exige: un
+    trabajo ``UPLOADED`` con 0 intentos describiría algo imposible.
+    """
+
+    schema_version: str = SCHEMA_VERSION_PUBLICACION
+
+    state: EstadoPublicacion = EstadoPublicacion.no_listo
+    attempt: int = Field(default=0, ge=0)
+    #: Nuestra, no de YouTube. Ver ``clave_idempotencia``.
+    idempotency_key: TextoNoVacio
+    started_at: datetime = Field(default_factory=_ahora)
+    updated_at: datetime = Field(default_factory=_ahora)
+    #: Por qué el trabajo está donde está. Obligatorio en los estados que no se
+    #: explican solos: un ``NEEDS_REVIEW`` sin motivo no le dice a nadie qué
+    #: reconciliar, y un ``FAILED`` sin motivo no distingue un fallo de un
+    #: abandono.
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _comprobar_trabajo(self) -> "PublishJob":
+        if self.updated_at < self.started_at:
+            raise ValueError(
+                "updated_at es anterior a started_at: el trabajo no puede haberse "
+                "actualizado antes de empezar"
+            )
+        if self.state in ESTADOS_CON_INTENTO and self.attempt < 1:
+            raise ValueError(
+                f"el estado {self.state.value!r} implica al menos un intento de "
+                f"subida y attempt es {self.attempt}"
+            )
+        if (
+            self.state in (EstadoPublicacion.no_listo, EstadoPublicacion.listo)
+            and self.attempt != 0
+        ):
+            raise ValueError(
+                f"el estado {self.state.value!r} es previo a cualquier subida y "
+                f"attempt es {self.attempt}"
+            )
+        if self.state in (
+            EstadoPublicacion.revision_pendiente,
+            EstadoPublicacion.fallido,
+        ) and not (self.reason or "").strip():
+            raise ValueError(
+                f"el estado {self.state.value!r} exige un motivo: sin él no hay "
+                f"nada que reconciliar ni que explicar"
+            )
+        return self
+
+    def transicionar(
+        self,
+        destino: EstadoPublicacion,
+        *,
+        metadata: PublishMetadata | None = None,
+        reason: str | None = None,
+        momento: datetime | None = None,
+    ) -> "PublishJob":
+        """Devuelve el trabajo avanzado al estado siguiente.
+
+        No muta: cada transición produce un artefacto nuevo, de modo que el
+        anterior sigue siendo evidencia de por dónde se pasó. Una transición que
+        la tabla no contempla levanta ``ValueError`` y no devuelve nada.
+
+        Entrar en ``UPLOADING`` incrementa ``attempt``, porque es el único punto
+        donde empieza una subida de verdad.
+
+        El trabajo nuevo se construye validándolo, no copiándolo: ``model_copy``
+        se salta los validadores, y por esa puerta entraría un ``NEEDS_REVIEW``
+        sin motivo o un ``attempt`` incoherente.
+        """
+        exigir_transicion(self.state, destino, metadata=metadata)
+        datos = self.model_dump()
+        datos.update(
+            state=destino,
+            attempt=self.attempt + (1 if destino is EstadoPublicacion.subiendo else 0),
+            updated_at=momento or _ahora(),
+            reason=reason if reason is not None else self.reason,
+        )
+        return PublishJob.model_validate(datos)
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in ESTADOS_TERMINALES
 
 
 class PublishResult(Artefacto):
-    """Resultado de la subida."""
+    """Qué devolvió YouTube, una vez comprobado. Hecho observado.
 
-    video_id: str
-    url: str
-    privacy_status: str
-    published_at: datetime
-    caption_track_id: str | None = None
+    No sustituye a ``PublishMetadata``: la metadata dice qué se pidió y esto dice
+    qué hay. ``privacy_status`` aparece en los dos porque son cosas distintas —lo
+    solicitado y lo observado— y compararlos es precisamente en qué consiste
+    verificar.
+
+    ``COMPLETED`` exige ``video_id``: no se puede dar por completada una
+    publicación sin el identificador de lo publicado. ``FAILED`` **no** lo exige,
+    porque un fallo puede ocurrir antes de que YouTube devuelva nada. Y
+    ``NEEDS_REVIEW`` no afirma ni que funcionara ni que fallara: es el estado de
+    lo que hay que ir a comprobar, con o sin ``video_id``.
+
+    El contrato no valida la forma de ``url``: construirla o comprobarla sería
+    afirmar un esquema de URLs de YouTube que este Gate no utiliza todavía.
+    """
+
+    schema_version: str = SCHEMA_VERSION_PUBLICACION
+
+    provider: TextoNoVacio = "youtube"
+    video_id: str | None = None
+    url: str | None = None
+    status: EstadoPublicacion
+    privacy_status: Privacidad | None = None
+    upload_attempts: int = Field(ge=1)
+    uploaded_at: datetime | None = None
+    completed_at: datetime | None = None
+    metadata_sha256: Sha256Hex | None = None
+    video_sha256: Sha256Hex | None = None
+
+    @model_validator(mode="after")
+    def _comprobar_resultado(self) -> "PublishResult":
+        if self.status not in ESTADOS_DE_RESULTADO:
+            permitidos = sorted(e.value for e in ESTADOS_DE_RESULTADO)
+            raise ValueError(
+                f"{self.status.value!r} describe por dónde va el trabajo, no lo que "
+                f"contestó YouTube; un resultado solo puede estar en {permitidos}"
+            )
+
+        tiene_id = bool((self.video_id or "").strip())
+
+        if self.status is EstadoPublicacion.completado:
+            if not tiene_id:
+                raise ValueError(
+                    "no se puede dar por completada una publicación sin video_id: "
+                    "no habría constancia de qué se publicó"
+                )
+            if self.completed_at is None:
+                raise ValueError("un resultado 'COMPLETED' registra cuándo se completó")
+        elif self.completed_at is not None:
+            raise ValueError(
+                f"hay completed_at con estado {self.status.value!r}: solo "
+                f"'COMPLETED' se ha completado"
+            )
+
+        # Un identificador y su fecha de subida van juntos: uno sin el otro deja
+        # el resultado a medio describir.
+        if tiene_id and self.uploaded_at is None:
+            raise ValueError(
+                "hay video_id sin uploaded_at: falta cuándo lo aceptó YouTube"
+            )
+        if self.uploaded_at is not None and not tiene_id:
+            raise ValueError(
+                "hay uploaded_at sin video_id: no consta qué se subió"
+            )
+        if tiene_id and not (self.url or "").strip():
+            raise ValueError("hay video_id sin url: falta dónde quedó el vídeo")
+
+        # UPLOADED y VERIFYING describen un vídeo que YouTube ya aceptó.
+        if (
+            self.status
+            in (EstadoPublicacion.subido, EstadoPublicacion.verificando)
+            and not tiene_id
+        ):
+            raise ValueError(
+                f"el estado {self.status.value!r} significa que YouTube devolvió un "
+                f"identificador, y no hay video_id"
+            )
+        return self

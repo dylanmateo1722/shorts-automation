@@ -32,6 +32,7 @@ on:
       - claude/gate-4-transformation-qa
       - claude/gate-5-e2e-render
       - claude/gate-6-sources-provenance
+      - claude/gate-7-youtube-publishing
   pull_request:
 
 permissions:
