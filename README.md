@@ -19,7 +19,8 @@ configuración ni historial con ese repositorio.
 | Gate 4 | Procedencia, transformación editorial y QA técnica | Aprobado |
 | Gate 5 | MVP de extremo a extremo: composición y MP4 final | Aprobado |
 | Gate 6 | Fuentes, evidencia y decisiones de licencia | Aprobado |
-| **Gate 7** | **Publicación: contratos y máquina de estados** | **Contratos formalizados; sin implementar** |
+| Gate 7.0 | Publicación: contratos y máquina de estados | Cerrado |
+| **Gate 7.1** | **OAuth con YouTube y verificación del canal** | **Implementado; sin aprobar** |
 | Gate 8+ | Discovery, análisis de competencia, publicación real | No iniciado |
 
 Con Gate 5 el pipeline produce un **Short vertical real**: 1080×1920, H.264,
@@ -31,10 +32,13 @@ versionada, y **nada llega al motor sin una decisión que lo autorice**.
 `render_allowed` significa que la política técnica lo permite — **no** que algo
 esté certificado legalmente.
 
-Gate 7 formaliza los contratos de publicación y su máquina de estados: qué se
+Gate 7.0 formaliza los contratos de publicación y su máquina de estados: qué se
 quiere publicar, por dónde va una ejecución y qué devolvió YouTube, con las
-transiciones válidas declaradas y las inválidas rechazadas. **Formalizado no es
-implementado:** no hay cliente de YouTube, ni OAuth, ni subida.
+transiciones válidas declaradas y las inválidas rechazadas.
+
+Gate 7.1 implementa la autenticación OAuth: canjear el refresh token, leer qué
+canal quedó autorizado y compararlo con el esperado. **Autenticar no es
+publicar:** no hay subida, no hay `videos.insert` y no hay publisher.
 
 **No hay** Discovery, ni scraping, ni análisis de competencia, ni publicación real,
 ni planificación.
@@ -958,20 +962,230 @@ intentos describiría algo imposible.
 El contrato no valida la forma de `url`: construirla o comprobarla sería afirmar un
 esquema de URLs de YouTube que este Gate todavía no utiliza.
 
-### Límites explícitos de esta fase
+### Límites explícitos de G7.0
 
 Formalizado: los tres contratos, los enums, la máquina de estados, las
 transiciones, los invariantes y la derivación de la clave de idempotencia.
 
-**No implementado, y no simulado:** cliente de la API de YouTube, OAuth, refresco
-de tokens, subida, subida reanudable, publicación real, programación y Discovery.
-No hay credenciales en el repositorio, no hay credenciales ficticias que parezcan
-funcionales y ningún contrato de publicación tiene un campo donde pudiera guardarse
-un token — hay un test que recorre los cuatro modelos para comprobarlo.
+**No implementado, y no simulado:** subida, subida reanudable, publicación real,
+programación y Discovery. Ningún contrato de publicación tiene un campo donde
+pudiera guardarse un token — hay un test que recorre los cuatro modelos para
+comprobarlo.
 
 El primer flujo real usará `privacy_status = private`. El contrato admite
 `unlisted` y `public` porque la intención es representable, no porque ya exista
 política para ellos.
+
+## Autenticación OAuth con YouTube (G7.1)
+
+Implementado: cargar credenciales, canjear el refresh token por un access token,
+leer qué canal quedó autorizado y compararlo con el esperado. **Nada más.** No
+hay subida, no hay `videos.insert` y no hay publisher.
+
+### Arquitectura
+
+```
+app/adapters/youtube/
+└── auth.py     credenciales · canje del token · identidad del canal · AUTH CHECK
+```
+
+Un módulo, un asunto. Cuando exista el publisher será un módulo **hermano** que
+use este, no una ampliación suya: la autenticación tiene que poder comprobarse
+sin que exista la capacidad de publicar, y hay un test que comprueba que `auth`
+no importa nada que huela a publisher ni a los contratos de G7.0.
+
+No se añadió ninguna dependencia. Se usa `urllib` de la biblioteca estándar,
+igual que `app/adapters/llm/openai_compatible.py`, por dos razones: no introducir
+una segunda manera de hacer HTTP en el proyecto, y porque con
+`google-api-python-client` el objeto de servicio deja `videos.insert` a una línea
+de distancia. Sin esa librería, lo prohibido está **ausente**, no solo sin
+escribir. Hay un test que enumera las URLs que el módulo contiene y comprueba que
+son exactamente cuatro, ninguna de subida.
+
+### Alcance
+
+```
+https://www.googleapis.com/auth/youtube.upload
+```
+
+Uno solo, el mínimo que fija D17, configurable con `YOUTUBE_SCOPE`.
+
+**Hay una incertidumbre documentada aquí.** `videos.insert` publica la lista de
+alcances que acepta; `channels.list` **no publica ninguna** —su apartado de
+autorización solo cubre el caso especial de `auditDetails`—. Así que la
+documentación oficial no afirma que `youtube.upload` baste para leer la identidad
+del canal con `mine=true`, ni afirma lo contrario. No se puede comprobar sin una
+autorización real. Ver «Qué queda por resolver».
+
+### Flujo de autorización
+
+El consentimiento inicial es **manual y local**, una sola vez:
+
+```
+inicialización local  →  navegador  →  consentimiento de Google
+                                              ↓
+                                      authorization code
+                                              ↓
+                                        refresh token
+                                              ↓
+                            almacenamiento seguro fuera del repositorio
+```
+
+Endpoints, según la documentación de Google para aplicaciones instaladas:
+
+| Paso | Endpoint |
+|---|---|
+| Consentimiento | `https://accounts.google.com/o/oauth2/v2/auth` |
+| Canje del token | `https://oauth2.googleapis.com/token` |
+| Identidad del canal | `https://www.googleapis.com/youtube/v3/channels?part=id&mine=true` |
+
+Para aplicaciones de escritorio, el redirect recomendado es la IP de loopback
+(`http://127.0.0.1:puerto`); el esquema de URI propio está desaconsejado.
+
+**Esta fase no automatiza el consentimiento inicial**: implementa usar una
+autorización ya obtenida, que es lo que hace falta para que CI funcione. El canje
+usa `grant_type=refresh_token` con `client_id`, `client_secret` y `refresh_token`.
+Se pide `part=id` y nada más: comparar identidades no necesita el título del canal,
+y pedir menos datos es la misma disciplina que pedir el alcance mínimo.
+
+### Variables de entorno
+
+| Variable | Qué es | ¿Secreto? |
+|---|---|---|
+| `YOUTUBE_CLIENT_ID` | identificador de la aplicación OAuth | no |
+| `YOUTUBE_CLIENT_SECRET` | secreto de la aplicación | **sí** |
+| `YOUTUBE_REFRESH_TOKEN` | la autorización persistente del canal | **sí** |
+| `EXPECTED_YOUTUBE_CHANNEL_ID` | canal en el que se permite publicar | no |
+| `YOUTUBE_SCOPE` | alcance; vacío usa el mínimo | no |
+| `YOUTUBE_TIMEOUT_S` | tiempo máximo por petición (30) | no |
+
+Las tres credenciales son **propiedades** de `Settings`, no campos del dataclass,
+por el mismo motivo que `LLM_API_KEY`: un campo entra en el `repr` y de ahí en
+cualquier traza. Y sus nombres contienen `SECRET` y `TOKEN`, que es exactamente lo
+que `app/core/redaction.py` reconoce, así que si una llegara a un log se
+enmascara. Las dos cosas, no una sola.
+
+### Verificación del canal
+
+```
+canal autenticado == canal esperado  →  AUTHENTICATED
+canal autenticado != canal esperado  →  WRONG_CHANNEL   (no se continúa)
+```
+
+**`authenticated` y `correct_channel` no son lo mismo**, y el resultado los
+distingue: en `WRONG_CHANNEL` la credencial funcionó —`authenticated` es
+verdadero— y aun así no se puede seguir. Solo `correct_channel` autoriza a
+avanzar hacia un futuro publisher.
+
+Sin `EXPECTED_YOUTUBE_CHANNEL_ID` la comprobación **falla** en vez de dar por
+bueno cualquier canal, y ni siquiera llama a Google: sin saber qué se espera no
+hay nada que comparar.
+
+No se valida el formato del identificador. La documentación garantiza que cada
+canal tiene uno único, pero no publica una gramática normativa; rechazar lo que no
+empiece por `UC` sería inventar una regla, y además inútil, porque lo que protege
+de publicar en el canal equivocado es la **comparación**, no el aspecto de la
+cadena.
+
+### Los siete desenlaces
+
+| Resultado | Qué pasó | ¿Reintentar? |
+|---|---|---|
+| `AUTHENTICATED` | credencial válida y canal correcto | no hace falta |
+| `WRONG_CHANNEL` | credencial válida, **otro** canal | no |
+| `CREDENTIALS_MISSING` | falta alguna variable | no |
+| `AUTHORIZATION_INVALID` | revocada, caducada o `invalid_grant` | **no** |
+| `INSUFFICIENT_SCOPE` | 403 `insufficientPermissions` | no |
+| `TRANSIENT_ERROR` | 429, 5xx, red caída, timeout, cuota | **sí** |
+| `API_ERROR` | la API rechazó la petición de forma permanente | no |
+
+`reintentable` se declara en positivo —solo `TRANSIENT_ERROR`— para que un
+desenlace nuevo no nazca reintentable por descuido. Una autorización revocada no
+se desrevoca reintentando, y hacerlo en bucle solo gastaría cuota y escondería
+que hace falta repetir el consentimiento.
+
+La cuota agotada se clasifica como transitoria porque se repone sola, sin que
+intervenga nadie. **La política de reintentos no se implementa aquí**: G7.1 solo
+deja la semántica lista para que el futuro publisher la reutilice.
+
+### Seguridad
+
+El refresh token no caduca solo, vale hasta que alguien lo revoque y basta por sí
+mismo para acceder al canal. Nunca entra en el repositorio, en `runs/`, en un
+artefacto, en un log, en un mensaje de error ni en un commit.
+
+Cuatro barreras, no una:
+
+1. las credenciales son propiedades, no campos, así que no hay `repr` que las lleve;
+2. `CredencialesOAuth` y `TokenAcceso` declaran `repr=False` en los campos sensibles;
+3. **el cuerpo de una respuesta de error no se propaga** —puede repetir lo que se
+   envió—: se extrae solo la etiqueta corta del campo `error` y se descarta el
+   resto, `error_description` incluida;
+4. el redactor del proyecto enmascara cualquier valor cuyo nombre de variable
+   contenga `TOKEN` o `SECRET`, por si algo se colara pese a lo anterior.
+
+Hay un test que recorre logs, stdout, stderr, el resultado serializado y el `repr`
+de cada objeto que toca la credencial, buscando el token de prueba.
+
+### Comprobar la autorización
+
+```bash
+python -m app youtube-auth
+```
+
+Imprime el resultado como JSON en stdout —las trazas van a stderr, para que la
+salida se pueda parsear— y termina con código 0 solo si el resultado es
+`AUTHENTICATED`. El JSON no lleva credenciales por construcción.
+
+### Cómo se probará en GitHub Actions
+
+CI **no tiene ni debe tener** credenciales para los tests normales. Lo que el
+workflow comprueba hoy es que la falta de credenciales produce un desenlace
+explícito (`CREDENTIALS_MISSING`), con la salida y el log libres de cualquier cosa
+con forma de credencial.
+
+Cuando llegue el momento de comprobarlo de verdad, el refresh token irá como
+secreto del repositorio y se expondrá solo al paso que lo necesite:
+
+```yaml
+env:
+  YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+  YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+  YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+  EXPECTED_YOUTUBE_CHANNEL_ID: ${{ vars.EXPECTED_YOUTUBE_CHANNEL_ID }}
+run: .venv/bin/python -m app youtube-auth
+```
+
+GitHub enmascara los secretos en los logs, pero eso es la última barrera y no la
+primera: el diseño ya evita que lleguen ahí. **No se usa `set -x`** en ningún paso.
+
+La prueba contra el OAuth real está aislada y se activa a propósito:
+
+```bash
+RUN_REAL_YOUTUBE_AUTH=1 pytest tests/test_youtube_auth_real.py -v -s
+```
+
+Sin esa variable se omite entera, con el motivo escrito en el informe. No se
+ejecuta en CI, no contiene credenciales y no sube nada.
+
+### Qué queda fuera de G7.1
+
+`videos.insert`, subida, subida reanudable, publicación, modificación de metadatos
+de vídeos, programación, Discovery, analytics, multi-canal, publicación pública y
+la política de reintentos.
+
+Tampoco se automatiza el consentimiento OAuth inicial: se obtiene una vez a mano,
+en una máquina con navegador.
+
+### Qué queda por resolver
+
+**Si `youtube.upload` basta para leer la identidad del canal.** La documentación
+de Google no lo dice, y no se puede averiguar sin una autorización real. El
+sistema está preparado para las dos respuestas: usa el alcance mínimo que manda
+D17, lo deja configurable, y si resulta que no basta el resultado sale como
+`INSUFFICIENT_SCOPE` nombrando el remedio, en vez de como un fallo opaco. Si eso
+ocurre, habrá necesidad técnica demostrada para ampliar el alcance —probablemente
+a `youtube.readonly`—, y esa es una decisión de arquitectura, no del código.
 
 ## Ejecutar una corrida
 

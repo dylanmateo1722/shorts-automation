@@ -385,6 +385,39 @@ jobs:
             --run-id "$RUN_ID" 2>&1 | tee /tmp/g6-hash.log
           grep -q "stage=provenance event=artifact_invalid" /tmp/g6-hash.log
 
+      # La autenticación de YouTube se comprueba SIN credenciales: en CI no hay
+      # ninguna y no debe haberla para esto. Lo que se demuestra es que la falta
+      # de credenciales produce un desenlace explícito en vez de un error opaco,
+      # y que no se llama a ningún endpoint de Google.
+      - name: La comprobación de YouTube falla con claridad sin credenciales
+        run: |
+          set +e
+          .venv/bin/python -m app youtube-auth > /tmp/auth.json 2> /tmp/auth.log
+          CODIGO=$?
+          set -e
+          test "$CODIGO" = "1" || { echo "se esperaba salida 1, hubo $CODIGO"; exit 1; }
+
+          .venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          datos = json.loads(Path("/tmp/auth.json").read_text(encoding="utf-8"))
+          assert datos["result"] == "CREDENTIALS_MISSING", datos
+          assert datos["authenticated"] is False, datos
+          assert datos["correct_channel"] is False, datos
+          assert datos["retryable"] is False, datos
+          assert datos["channel_id"] is None, datos
+          assert datos["scope_requested"].endswith("/auth/youtube.upload"), datos
+
+          # Ni la salida ni el log pueden tener forma de credencial.
+          for ruta in ("/tmp/auth.json", "/tmp/auth.log"):
+              texto = Path(ruta).read_text(encoding="utf-8").lower()
+              for prohibido in ("refresh_token", "client_secret", "access_token", "ya29."):
+                  assert prohibido not in texto, (ruta, prohibido)
+
+          print(f"AUTH CHECK sin credenciales: {datos['result']}, sin filtraciones")
+          PY
+
       - name: Publicar artefactos de voz, transformación y QA
         if: always()
         uses: actions/upload-artifact@v4

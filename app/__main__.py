@@ -4,6 +4,7 @@
                       [--run-id UUID] [--force STAGE] [--reference-asset RUTA]
                       [--sources ARCHIVO]
     python -m app validate <run-id> [--pipeline ...]
+    python -m app youtube-auth
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -13,6 +14,7 @@ omiten solas. Un alias no aportaría nada.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 
@@ -119,6 +121,12 @@ def _construir_parser() -> argparse.ArgumentParser:
         help="secuencia con la que se validan los artefactos",
     )
 
+    sub.add_parser(
+        "youtube-auth",
+        help="comprueba la autorización de YouTube y el canal autenticado; "
+             "no sube nada",
+    )
+
     return parser
 
 
@@ -127,9 +135,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = Settings.desde_entorno()
-    configurar_logging(getattr(logging, settings.log_level, logging.INFO))
+    # La comprobación de YouTube imprime un JSON en stdout, así que sus trazas van
+    # a stderr: mezclarlas dejaría la salida sin parsear, que es justo lo que CI
+    # necesita hacer con ella.
+    configurar_logging(
+        getattr(logging, settings.log_level, logging.INFO),
+        stream=sys.stderr if args.comando == "youtube-auth" else None,
+    )
 
     try:
+        if args.comando == "youtube-auth":
+            # Va antes de resolver el pipeline: comprobar la autorización no
+            # tiene nada que ver con las etapas de una corrida, y no debe
+            # necesitar ninguna.
+            from app.adapters.youtube import ResultadoAuth, comprobar_autenticacion
+
+            comprobacion = comprobar_autenticacion(settings)
+            # Se imprime el dict, que por construcción no lleva credenciales.
+            print(json.dumps(comprobacion.a_dict(), indent=2, ensure_ascii=False))
+            return 0 if comprobacion.resultado is ResultadoAuth.autenticado else 1
+
         etapas = PIPELINES[args.pipeline]()
 
         if args.comando == "run":

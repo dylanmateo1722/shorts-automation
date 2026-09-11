@@ -89,6 +89,11 @@ class Settings:
     subtitle_font: str = "DejaVu Sans"
     subtitle_font_size: int = 64
 
+    # --- YouTube ---
+    # Solo el timeout es campo: las credenciales son propiedades para que no
+    # entren en el repr del dataclass. Ver más abajo.
+    youtube_timeout_s: int = 30
+
     @classmethod
     def desde_entorno(cls) -> "Settings":
         """Construye la configuración leyendo el entorno."""
@@ -120,6 +125,7 @@ class Settings:
             subtitle_margin_h=_entero("SUBTITLE_MARGIN_H", 60),
             subtitle_font=os.environ.get("SUBTITLE_FONT", "DejaVu Sans").strip(),
             subtitle_font_size=_entero("SUBTITLE_FONT_SIZE", 64),
+            youtube_timeout_s=_entero("YOUTUBE_TIMEOUT_S", 30),
         )
 
     # --- MoneyPrinterTurbo -------------------------------------------------
@@ -167,6 +173,60 @@ class Settings:
         por descuido en un ``repr``, en un volcado del manifest ni en un log.
         """
         return os.environ.get("LLM_API_KEY", "")
+
+    # --- YouTube (Gate 7.1) ------------------------------------------------
+    #
+    # Las tres credenciales son propiedades por el mismo motivo que
+    # ``llm_api_key``: un campo del dataclass entra en el ``repr`` y desde ahí
+    # en cualquier traza. Además, sus nombres contienen SECRET y TOKEN, así que
+    # ``app.core.redaction`` los reconoce y los enmascara si alguno llegara a un
+    # log pese a todo. Las dos cosas juntas, no una sola.
+
+    @property
+    def youtube_client_id(self) -> str:
+        """Identificador de la aplicación OAuth.
+
+        En una aplicación instalada viaja dentro del propio programa, así que no
+        es el secreto que protege la cuenta; aun así solo se lee del entorno.
+        """
+        return os.environ.get("YOUTUBE_CLIENT_ID", "")
+
+    @property
+    def youtube_client_secret(self) -> str:
+        """Secreto de la aplicación OAuth. **Solo** desde el entorno."""
+        return os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+
+    @property
+    def youtube_refresh_token(self) -> str:
+        """Autorización persistente del canal. **Solo** desde el entorno.
+
+        Es la credencial más sensible del proyecto: no caduca sola, vale hasta
+        que alguien la revoque y basta por sí misma para obtener acceso. No se
+        versiona, no se escribe en ``runs/`` y no entra en ningún artefacto.
+        """
+        return os.environ.get("YOUTUBE_REFRESH_TOKEN", "")
+
+    @property
+    def expected_youtube_channel_id(self) -> str:
+        """Canal en el que está permitido publicar.
+
+        No es un secreto —un identificador de canal es público—, pero sí es la
+        única defensa contra publicar en la cuenta equivocada, así que la
+        comprobación lo exige y no asume ninguno por defecto.
+        """
+        return os.environ.get("EXPECTED_YOUTUBE_CHANNEL_ID", "").strip()
+
+    @property
+    def youtube_scope(self) -> str:
+        """Alcance OAuth solicitado.
+
+        Por defecto el mínimo que fija D17. Es configurable porque la
+        documentación de Google no afirma que ese alcance baste para leer la
+        identidad del canal, y cambiarlo no debería exigir tocar código.
+        """
+        from app.adapters.youtube.auth import SCOPE_SUBIDA
+
+        return os.environ.get("YOUTUBE_SCOPE", "").strip() or SCOPE_SUBIDA
 
     def verificar_llm(self) -> None:
         """Comprueba que hay proveedor configurado antes de gastar en llamadas.

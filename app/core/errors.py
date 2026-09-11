@@ -127,6 +127,18 @@ class SubtituloInvalido(ErrorPermanente):
     """Los cues generados incumplen una regla que invalida el subtitulado."""
 
 
+class AutorizacionInvalida(ErrorPermanente):
+    """La autorización OAuth no sirve: revocada, caducada o de alcance corto.
+
+    Es permanente **a propósito**. Reintentar una autorización revocada la deja
+    igual de revocada, y hacerlo en bucle solo gasta cuota y esconde que lo que
+    hace falta es que una persona repita el consentimiento.
+
+    Se separa de ``ConfiguracionInvalida`` porque el remedio es otro: allí falta
+    una variable, aquí la variable está y lo que ya no vale es lo que contiene.
+    """
+
+
 class LicenciaDenegada(ErrorPermanente):
     """La fuente no puede usarse. No es un fallo: es una decisión."""
 

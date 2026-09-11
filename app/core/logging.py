@@ -31,18 +31,22 @@ class _FiltroRedaccion(logging.Filter):
         return True
 
 
-def configurar_logging(nivel: int = logging.INFO) -> logging.Logger:
+def configurar_logging(nivel: int = logging.INFO, *, stream=None) -> logging.Logger:
     """Configura el logger de la aplicación.
 
     ``force=True`` porque tanto los runners de CI como los notebooks registran
     handlers en el logger raíz antes de que arranque la aplicación; sin él,
     ``basicConfig`` se ignora en silencio y no se ve ninguna traza.
+
+    ``stream`` es ``sys.stdout`` por defecto, como desde Gate 1. Se puede cambiar
+    para que un comando cuya salida es un documento legible por máquina no la
+    mezcle con las trazas: un JSON con una línea de log delante no es un JSON.
     """
     logging.basicConfig(
         level=nivel,
         format=FORMATO,
         datefmt=FORMATO_HORA,
-        stream=sys.stdout,
+        stream=stream if stream is not None else sys.stdout,
         force=True,
     )
     logger = logging.getLogger(NOMBRE_LOGGER)
