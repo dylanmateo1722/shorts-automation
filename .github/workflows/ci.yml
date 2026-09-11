@@ -31,6 +31,7 @@ on:
       - claude/gate-3-tts-subtitles
       - claude/gate-4-transformation-qa
       - claude/gate-5-e2e-render
+      - claude/gate-6-sources-provenance
   pull_request:
 
 permissions:
