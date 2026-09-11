@@ -469,7 +469,11 @@ def identidad_del_canal(
 
 
 def comprobar_autenticacion(
-    settings: Settings, *, timeout_s: int | None = None
+    settings: Settings,
+    *,
+    timeout_s: int | None = None,
+    token: TokenAcceso | None = None,
+    exigir_canal_esperado: bool = True,
 ) -> ComprobacionAuth:
     """Comprueba credenciales, identidad del canal y coincidencia con el esperado.
 
@@ -479,6 +483,19 @@ def comprobar_autenticacion(
     proyecto, que es donde vive la semántica de reintento.
 
     **Nunca devuelve un resultado que autorice a seguir si el canal no coincide.**
+
+    Los dos parámetros opcionales existen para el alta interactiva, que llega
+    aquí en una situación distinta y no debería duplicar esta lógica:
+
+    * ``token`` evita el canje del refresh token. El alta acaba de obtener un
+      access token y todavía **no** hay refresh token en el entorno: leerlo de
+      ahí fallaría por algo que no es el problema.
+    * ``exigir_canal_esperado=False`` permite terminar sin
+      ``EXPECTED_YOUTUBE_CHANNEL_ID``, porque el alta es justo el momento en que
+      se averigua cuál es el canal. Si está configurado se compara igual, y una
+      discrepancia sigue dando ``WRONG_CHANNEL``.
+
+    Con los valores por defecto el comportamiento es exactamente el de siempre.
     """
     timeout = timeout_s if timeout_s is not None else settings.youtube_timeout_s
     esperado = settings.expected_youtube_channel_id.strip()
@@ -503,7 +520,7 @@ def comprobar_autenticacion(
         )
         return comprobacion
 
-    if not esperado:
+    if not esperado and exigir_canal_esperado:
         return resultado(
             ResultadoAuth.credenciales_ausentes,
             "falta EXPECTED_YOUTUBE_CHANNEL_ID: sin canal esperado no hay nada "
@@ -511,13 +528,15 @@ def comprobar_autenticacion(
             "que no comprobar",
         )
 
-    try:
-        credenciales = cargar_credenciales(settings)
-    except ConfiguracionInvalida as exc:
-        return resultado(ResultadoAuth.credenciales_ausentes, exc.mensaje)
+    if token is None:
+        try:
+            credenciales = cargar_credenciales(settings)
+        except ConfiguracionInvalida as exc:
+            return resultado(ResultadoAuth.credenciales_ausentes, exc.mensaje)
 
     try:
-        token = obtener_access_token(credenciales, timeout_s=timeout)
+        if token is None:
+            token = obtener_access_token(credenciales, timeout_s=timeout)
         identidad = identidad_del_canal(token, timeout_s=timeout)
     except AutorizacionInvalida as exc:
         tipo = (
@@ -530,6 +549,18 @@ def comprobar_autenticacion(
         return resultado(ResultadoAuth.error_transitorio, exc.mensaje)
     except RespuestaInvalida as exc:
         return resultado(ResultadoAuth.error_api, exc.mensaje)
+
+    if not esperado:
+        # Solo ocurre en el alta interactiva, que es donde se descubre el canal.
+        # Se dice que no se comparó en vez de dejarlo implícito: un
+        # ``AUTHENTICATED`` sin comparación no afirma lo mismo que uno con ella.
+        return resultado(
+            ResultadoAuth.autenticado,
+            "la credencial es válida; no había canal esperado configurado, así "
+            "que no se comparó con ninguno",
+            channel_id=identidad.channel_id,
+            scope_concedido=token.scope,
+        )
 
     if identidad.channel_id != esperado:
         return resultado(

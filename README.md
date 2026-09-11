@@ -36,9 +36,10 @@ Gate 7.0 formaliza los contratos de publicación y su máquina de estados: qué 
 quiere publicar, por dónde va una ejecución y qué devolvió YouTube, con las
 transiciones válidas declaradas y las inválidas rechazadas.
 
-Gate 7.1 implementa la autenticación OAuth: canjear el refresh token, leer qué
-canal quedó autorizado y compararlo con el esperado. **Autenticar no es
-publicar:** no hay subida, no hay `videos.insert` y no hay publisher.
+Gate 7.1 implementa la autenticación OAuth: el alta interactiva local que obtiene
+el refresh token, y la comprobación que lee qué canal quedó autorizado y lo
+compara con el esperado. **Autenticar no es publicar:** no hay subida, no hay
+`videos.insert` y no hay publisher.
 
 **No hay** Discovery, ni scraping, ni análisis de competencia, ni publicación real,
 ni planificación.
@@ -986,11 +987,17 @@ hay subida, no hay `videos.insert` y no hay publisher.
 
 ```
 app/adapters/youtube/
-└── auth.py     credenciales · canje del token · identidad del canal · AUTH CHECK
+├── auth.py              comprueba una autorización que YA existe
+└── oauth_bootstrap.py   la OBTIENE, una vez, a mano, con navegador
 ```
 
-Un módulo, un asunto. Cuando exista el publisher será un módulo **hermano** que
-use este, no una ampliación suya: la autenticación tiene que poder comprobarse
+Dos momentos distintos de la vida del proyecto: `auth` corre en cada
+comprobación y en CI; `oauth_bootstrap` corre una vez cada muchos meses y **nunca**
+en CI. El alta reutiliza el AUTH CHECK de `auth` en vez de duplicar la
+clasificación de desenlaces.
+
+Cuando exista el publisher será otro módulo **hermano**, no una ampliación de
+ninguno de estos: la autenticación tiene que poder comprobarse
 sin que exista la capacidad de publicar, y hay un test que comprueba que `auth`
 no importa nada que huela a publisher ni a los contratos de G7.0.
 
@@ -1127,15 +1134,88 @@ Cuatro barreras, no una:
 Hay un test que recorre logs, stdout, stderr, el resultado serializado y el `repr`
 de cada objeto que toca la credencial, buscando el token de prueba.
 
+### Dos comandos que no significan lo mismo
+
+| Comando | Qué hace | Cuándo se usa |
+|---|---|---|
+| `youtube-auth-bootstrap` | **obtiene** la autorización | una vez, a mano, con navegador |
+| `youtube-auth` | **comprueba** una autorización ya configurada | en cada verificación y en CI |
+
+El primero abre un navegador y produce un refresh token. El segundo no abre nada
+y no produce nada: solo dice si lo que hay configurado sirve.
+
+### Alta OAuth local (una sola vez)
+
+Antes de empezar hace falta un cliente OAuth de tipo **Desktop** creado en Google
+Cloud, y su JSON descargado. **Ese archivo no se versiona, no se copia al
+repositorio y no se sube a GitHub Actions.** Se queda donde lo dejó el navegador
+y solo se lee de ahí:
+
+```bash
+python -m app youtube-auth-bootstrap --credentials ~/Descargas/client_secret_....json
+```
+
+Lo que ocurre, en orden:
+
+1. se leen del JSON **solo** `client_id` y `client_secret`;
+2. se genera PKCE (`code_verifier` de 64 caracteres y su `code_challenge` S256) y
+   un `state` aleatorio;
+3. se levanta un servidor **únicamente en loopback**, en un puerto que elige el
+   sistema;
+4. se abre el navegador en la pantalla de consentimiento de Google, pidiendo el
+   alcance de `YOUTUBE_SCOPE` y acceso offline;
+5. al volver, se comprueba que el `state` coincide —si no, la respuesta se
+   descarta— y el servidor **se cierra de inmediato**;
+6. se canjea el código con `grant_type=authorization_code` y el `code_verifier`;
+7. se ejecuta el mismo AUTH CHECK de `youtube-auth` con el token recién obtenido.
+
+Opciones:
+
+| Opción | Para qué |
+|---|---|
+| `--timeout SEGUNDOS` | cuánto esperar el consentimiento (300 por defecto) |
+| `--forzar-consentimiento` | añade `prompt=consent`; es el remedio cuando una reautorización devuelve access token pero **ningún** refresh token |
+
+**El refresh token no se guarda en ningún archivo.** No se escribe en el
+repositorio, ni en `runs/`, ni en un `.env` que el comando cree por su cuenta:
+escribirlo sería decidir por ti dónde vive tu credencial más sensible, y crear un
+archivo que alguien acabaría subiendo sin querer. Se muestra **una vez** por
+stderr para que lo copies a tu gestor de secretos; el JSON del resultado que va a
+stdout lleva solo una pista enmascarada de sus extremos.
+
+Después del alta, configura estas cuatro variables —el propio comando te las
+imprime con el canal ya rellenado—:
+
+```
+YOUTUBE_CLIENT_ID=...
+YOUTUBE_CLIENT_SECRET=...
+YOUTUBE_REFRESH_TOKEN=...
+EXPECTED_YOUTUBE_CHANNEL_ID=UC...
+```
+
+En local van en tu `.env`, que está en `.gitignore`. En CI van como secretos del
+repositorio.
+
 ### Comprobar la autorización
 
 ```bash
 python -m app youtube-auth
 ```
 
-Imprime el resultado como JSON en stdout —las trazas van a stderr, para que la
-salida se pueda parsear— y termina con código 0 solo si el resultado es
-`AUTHENTICATED`. El JSON no lleva credenciales por construcción.
+Solo **verifica** lo que ya está configurado: no autoriza nada, no abre navegador
+y no obtiene ningún token nuevo. Imprime el resultado como JSON en stdout —las
+trazas van a stderr, para que la salida se pueda parsear— y termina con código 0
+solo si el resultado es `AUTHENTICATED`. El JSON no lleva credenciales por
+construcción.
+
+A diferencia del alta, este comando **exige** `EXPECTED_YOUTUBE_CHANNEL_ID`: en el
+alta el canal es lo que se está descubriendo, aquí es contra lo que se compara.
+
+### Todavía no existe publicación
+
+Ni el alta ni la comprobación suben nada. No hay `videos.insert`, no hay
+publisher, no hay programación. Lo único que el proyecto sabe hacer con YouTube
+hoy es autenticarse y decir de qué canal es la autorización.
 
 ### Cómo se probará en GitHub Actions
 
@@ -1174,8 +1254,9 @@ ejecuta en CI, no contiene credenciales y no sube nada.
 de vídeos, programación, Discovery, analytics, multi-canal, publicación pública y
 la política de reintentos.
 
-Tampoco se automatiza el consentimiento OAuth inicial: se obtiene una vez a mano,
-en una máquina con navegador.
+El consentimiento OAuth inicial **sí** está implementado, como alta interactiva
+local: ver «Alta OAuth local». Lo que no se automatiza es ejecutarlo sin una
+persona delante, y eso es deliberado — el consentimiento lo da un humano.
 
 ### Qué queda por resolver
 

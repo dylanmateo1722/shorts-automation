@@ -5,6 +5,7 @@
                       [--sources ARCHIVO]
     python -m app validate <run-id> [--pipeline ...]
     python -m app youtube-auth
+    python -m app youtube-auth-bootstrap --credentials RUTA
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -123,8 +124,29 @@ def _construir_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "youtube-auth",
-        help="comprueba la autorización de YouTube y el canal autenticado; "
-             "no sube nada",
+        help="comprueba una autorización de YouTube ya configurada; no sube nada",
+    )
+
+    alta = sub.add_parser(
+        "youtube-auth-bootstrap",
+        help="alta OAuth interactiva y local: obtiene el refresh token. Abre el "
+             "navegador y NO sube nada",
+    )
+    alta.add_argument(
+        "--credentials", required=True, metavar="RUTA",
+        help="ruta al JSON del cliente OAuth de escritorio descargado de Google "
+             "Cloud. El archivo NO se copia ni se versiona: solo se leen de él "
+             "client_id y client_secret",
+    )
+    alta.add_argument(
+        "--timeout", type=int, default=None, metavar="SEGUNDOS",
+        help="cuánto esperar el consentimiento en el navegador (300 por defecto)",
+    )
+    alta.add_argument(
+        "--forzar-consentimiento", action="store_true",
+        help="fuerza la pantalla de consentimiento aunque ya se hubiera "
+             "concedido. Es el remedio cuando una reautorización devuelve "
+             "access token pero ningún refresh token",
     )
 
     return parser
@@ -140,7 +162,11 @@ def main(argv: list[str] | None = None) -> int:
     # necesita hacer con ella.
     configurar_logging(
         getattr(logging, settings.log_level, logging.INFO),
-        stream=sys.stderr if args.comando == "youtube-auth" else None,
+        stream=(
+            sys.stderr
+            if args.comando in ("youtube-auth", "youtube-auth-bootstrap")
+            else None
+        ),
     )
 
     try:
@@ -154,6 +180,33 @@ def main(argv: list[str] | None = None) -> int:
             # Se imprime el dict, que por construcción no lleva credenciales.
             print(json.dumps(comprobacion.a_dict(), indent=2, ensure_ascii=False))
             return 0 if comprobacion.resultado is ResultadoAuth.autenticado else 1
+
+        if args.comando == "youtube-auth-bootstrap":
+            from app.adapters.youtube import (
+                ResultadoAuth,
+                TIMEOUT_CALLBACK_S,
+                ejecutar_bootstrap,
+                instrucciones,
+            )
+
+            resultado = ejecutar_bootstrap(
+                settings,
+                args.credentials,
+                timeout_callback_s=args.timeout or TIMEOUT_CALLBACK_S,
+                forzar_consentimiento=args.forzar_consentimiento,
+            )
+            # El resumen va como JSON y NO lleva el refresh token: a_dict solo
+            # incluye una pista enmascarada.
+            print(json.dumps(resultado.a_dict(), indent=2, ensure_ascii=False))
+            # El token, una sola vez, por stderr y separado del documento, para
+            # que copiarlo no sea copiar también el JSON del resultado.
+            print("\n" + instrucciones(resultado), file=sys.stderr)
+            print(
+                f"REFRESH TOKEN (cópialo ahora, no se guarda en ningún sitio):\n\n"
+                f"    {resultado.refresh_token}\n",
+                file=sys.stderr,
+            )
+            return 0 if resultado.comprobacion.autenticado else 1
 
         etapas = PIPELINES[args.pipeline]()
 
