@@ -26,16 +26,28 @@ legal es un juicio humano y vive sin evaluar en ``QAResult``.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
+from app.adapters.media import sha256_archivo
+from app.config.provenance import (
+    VERSION_POLITICA,
+    ArchivoDeclaraciones,
+    declarar_referencia,
+    decidir,
+)
 from app.contracts.models import (
     AdaptedScript,
-    AssetProvenance,
     BaseLicencia,
     ClaseFuente,
     EstadoValidacion,
+    Evidence,
+    LicenseDecision,
     OverlaySpec,
     ProvenanceLedger,
+    SourceAsset,
     SubtitleAsset,
+    TipoEvidencia,
+    TipoMedio,
     TipoTransformacion,
     TransformationElement,
     TransformationSet,
@@ -70,6 +82,15 @@ CARACTERES_LINEA_OVERLAY = 22
 #: Clave de parámetro con los recursos que la corrida consultó como referencia.
 #: Se declaran explícitamente: el pipeline no los descubre ni los descarga.
 CLAVE_REFERENCIAS = "reference_assets"
+
+#: Clave de parámetro con la ruta del archivo JSON que declara fuentes externas.
+#: Es la única entrada de material ajeno: no hay búsqueda ni descarga automática.
+CLAVE_DECLARACIONES = "source_declarations"
+
+#: Prefijo de los identificadores de las fuentes que produce el propio pipeline.
+#: El identificador es el papel del recurso, no su ruta: la ruta puede cambiar y
+#: la identidad no.
+PREFIJO_PROPIO = "pipeline"
 
 
 def _ahora() -> datetime:
@@ -234,21 +255,42 @@ def _material_visual(ws: Workspace) -> str | None:
     return material.output_path
 
 
-def registrar_procedencia(ctx: ContextoEtapa) -> ProvenanceLedger:
-    """Declara cada recurso de la corrida y cuáles puede usar el render."""
+def _propios(ctx: ContextoEtapa) -> list[tuple[str, str, TipoMedio, str, str]]:
+    """Recursos que produce el pipeline: papel, ruta, medio, prueba y por qué.
+
+    La evidencia de un recurso propio es el artefacto que lo produjo: registra
+    proveedor, modelo y parámetros, así que permite rastrear la generación sin
+    pedirle a nadie un documento jurídico. Es lo que distingue ``own`` de
+    ``unknown``, que es todo lo que hace falta aquí.
+    """
     ws: Workspace = ctx.workspace
     voz = _leer(ctx, ARTEFACTO_VOZ, VoiceAsset)
     subtitulos = _leer(ctx, ARTEFACTO_SUBTITULOS, SubtitleAsset)
     overlay = _leer(ctx, ARTEFACTO_OVERLAY, OverlaySpec)
 
-    # Todo lo que el pipeline produce es propio, y esa es su base de
-    # procedencia. No se afirma nada sobre material de terceros porque en esta
-    # corrida no hay ninguno.
-    propios = [
-        (voz.audio_path, "narración sintetizada a partir del guion propio"),
-        (subtitulos.srt_path, "subtítulos propios, alineados con la narración"),
-        (subtitulos.ass_path, "presentación de los subtítulos propios"),
-        (overlay.overlay_path, "rótulo original generado del gancho del guion"),
+    def prueba(nombre: str) -> str:
+        return ws.relativa(ws.ruta_artefacto(nombre))
+
+    filas = [
+        (
+            "narration", voz.audio_path, TipoMedio.audio, prueba(ARTEFACTO_VOZ),
+            "narración sintetizada a partir del guion propio de esta corrida",
+        ),
+        (
+            "subtitles_srt", subtitulos.srt_path, TipoMedio.subtitulos,
+            prueba(ARTEFACTO_SUBTITULOS),
+            "subtítulos propios, derivados de la narración de esta corrida",
+        ),
+        (
+            "subtitles_ass", subtitulos.ass_path, TipoMedio.subtitulos,
+            prueba(ARTEFACTO_SUBTITULOS),
+            "presentación de los subtítulos propios de esta corrida",
+        ),
+        (
+            "overlay", overlay.overlay_path, TipoMedio.subtitulos,
+            prueba(ARTEFACTO_OVERLAY),
+            "rótulo original generado del gancho del guion propio",
+        ),
     ]
 
     # El material visual, cuando la corrida llega al render. Se lee del artefacto
@@ -256,94 +298,288 @@ def registrar_procedencia(ctx: ContextoEtapa) -> ProvenanceLedger:
     # Gate: si no existe, la corrida termina en la QA de artefactos y no hay
     # nada visual que autorizar.
     if (material := _material_visual(ws)) is not None:
-        propios.append(
-            (material, "material visual generado por el pipeline, sin terceros")
-        )
-    assets = [
-        AssetProvenance(
-            asset_path=ruta,
-            source_class=ClaseFuente.render_permitido,
-            basis=BaseLicencia.propia,
-            evidence_ref="generado por este pipeline",
-            description=descripcion,
-        )
-        for ruta, descripcion in propios
-    ]
-
-    referencias = _referencias(ctx)
-    for ruta in referencias:
-        assets.append(
-            AssetProvenance(
-                asset_path=ruta,
-                source_class=ClaseFuente.solo_referencia,
-                basis=BaseLicencia.ninguna,
-                description="consultado como referencia temática; no utilizable en el render",
-                evidence_ref="declarado como referencia en la entrada de la corrida",
+        filas.append(
+            (
+                "material", material, TipoMedio.video, prueba("render_material"),
+                "material visual generado por el motor a partir del guion propio",
             )
         )
+    return filas
 
-    permitidos = [ruta for ruta, _ in propios]
-    for ruta in permitidos:
-        if not ws.ruta(ruta).is_file():
+
+def _fuente_propia(
+    ws: Workspace, papel: str, ruta: str, medio: TipoMedio, prueba: str, descripcion: str
+) -> SourceAsset:
+    """Registra un recurso del pipeline, con su huella y su trazabilidad."""
+    archivo = ws.ruta(ruta)
+    if not archivo.is_file():
+        raise ProcedenciaInvalida(
+            f"se declararía {ruta!r} como utilizable en el render pero el archivo "
+            f"no existe",
+            stage="provenance",
+        )
+    asset_id = f"{PREFIJO_PROPIO}:{papel}"
+    return SourceAsset(
+        run_id=ws.run_id,
+        asset_id=asset_id,
+        media_kind=medio,
+        origin="shorts-automation pipeline",
+        local_path=ruta,
+        sha256=sha256_archivo(archivo),
+        obtained_at=_ahora(),
+        evidence=[
+            Evidence(
+                evidence_id=f"{asset_id}:origen",
+                kind=TipoEvidencia.registro_propiedad,
+                reference=prueba,
+                description=descripcion,
+            )
+        ],
+    )
+
+
+def _declaraciones(ctx: ContextoEtapa) -> ArchivoDeclaraciones:
+    """Fuentes externas declaradas a mano, si la corrida aportó un archivo."""
+    ruta = ctx.parametros.get(CLAVE_DECLARACIONES)
+    if not ruta:
+        return ArchivoDeclaraciones()
+    archivo = Path(str(ruta))
+    if not archivo.is_file():
+        raise EntradaInvalida(
+            f"no existe el archivo de fuentes declaradas {str(ruta)!r}",
+            stage="provenance",
+        )
+    try:
+        return ArchivoDeclaraciones.leer(archivo)
+    except (ValueError, OSError) as exc:
+        raise EntradaInvalida(
+            f"el archivo de fuentes declaradas {str(ruta)!r} no es válido: {exc}",
+            stage="provenance",
+        ) from exc
+
+
+def _fuentes_externas(ctx: ContextoEtapa) -> list[tuple[BaseLicencia, SourceAsset]]:
+    """Fuentes externas declaradas, con su huella ya calculada.
+
+    Una declaración que apunta a un archivo local tiene que apuntar a un archivo
+    que exista: si no existe, la declaración describe algo que no está, y eso no
+    es una fuente sino un error de entrada. Una fuente de la que solo se conoce
+    la URL es legítima y simplemente no trae ``local_path``.
+    """
+    ws: Workspace = ctx.workspace
+    externas: list[tuple[BaseLicencia, SourceAsset]] = []
+    for declaracion in _declaraciones(ctx).sources:
+        try:
+            fuente = declaracion.fuente(ws.run_id)
+        except ValueError as exc:
+            raise EntradaInvalida(
+                f"fuente declarada inválida: {exc}", stage="provenance"
+            ) from exc
+        if fuente.local_path is not None:
+            archivo = ws.ruta(fuente.local_path)
+            if not archivo.is_file():
+                raise EntradaInvalida(
+                    f"la fuente declarada {fuente.asset_id!r} apunta a "
+                    f"{fuente.local_path!r}, que no existe en la corrida",
+                    stage="provenance",
+                )
+            if fuente.sha256 is None:
+                fuente = fuente.model_copy(
+                    update={"sha256": sha256_archivo(archivo)}
+                )
+        externas.append((declaracion.basis, fuente))
+    return externas
+
+
+def registrar_procedencia(ctx: ContextoEtapa) -> ProvenanceLedger:
+    """Construye la cadena fuente → evidencia → decisión de toda la corrida.
+
+    Cada recurso se registra como ``SourceAsset`` con su evidencia, y cada uno
+    recibe una ``LicenseDecision`` tomada por la política. Lo que el pipeline
+    produce se decide con base ``own``; lo declarado como referencia no se evalúa
+    y queda ``reference_only``; lo declarado como fuente externa pasa por la
+    política con la base que alega, y puede acabar en cualquiera de las cuatro
+    clases.
+    """
+    ws: Workspace = ctx.workspace
+
+    fuentes: list[SourceAsset] = []
+    decisiones: list[LicenseDecision] = []
+    permitidos: list[str] = []
+
+    for papel, ruta, medio, prueba, descripcion in _propios(ctx):
+        fuente = _fuente_propia(ws, papel, ruta, medio, prueba, descripcion)
+        decision = decidir(fuente, BaseLicencia.propia, run_id=ws.run_id)
+        if decision.decision is not ClaseFuente.render_permitido:
+            # No debería ocurrir: un recurso propio con su evidencia cumple la
+            # política. Si ocurre, es que la política cambió y el pipeline no.
             raise ProcedenciaInvalida(
-                f"se declararía {ruta!r} como utilizable en el render pero el "
-                f"archivo no existe",
+                f"la política {VERSION_POLITICA} no autoriza el recurso propio "
+                f"{fuente.asset_id!r}: {decision.reason}",
                 stage="provenance",
             )
+        fuentes.append(fuente)
+        decisiones.append(decision)
+        permitidos.append(ruta)
 
+    referencias = _referencias(ctx)
+    for indice, ruta in enumerate(referencias):
+        fuente = SourceAsset(
+            run_id=ws.run_id,
+            asset_id=f"reference:{indice}",
+            media_kind=TipoMedio.otro,
+            origin="declarado como referencia en la entrada de la corrida",
+            local_path=ruta,
+            notes="consultado como referencia temática; no utilizable en el render",
+        )
+        fuentes.append(fuente)
+        decisiones.append(declarar_referencia(fuente, run_id=ws.run_id))
+
+    for basis, fuente in _fuentes_externas(ctx):
+        fuentes.append(fuente)
+        decisiones.append(decidir(fuente, basis, run_id=ws.run_id))
+
+    # El contrato rechaza el ledger si algo que no esté autorizado entrara en
+    # render_assets. La restricción es estructural: no hay etapa que pueda
+    # olvidarse de comprobarla.
+    try:
+        ledger = ProvenanceLedger(
+            run_id=ws.run_id,
+            sources=fuentes,
+            decisions=decisiones,
+            render_assets=permitidos,
+        )
+    except ValueError as exc:
+        raise ProcedenciaInvalida(
+            f"el registro de procedencia es incoherente: {exc}", stage="provenance"
+        ) from exc
+
+    por_clase = {
+        clase.value: len(ledger.por_clase(clase)) for clase in ClaseFuente
+    }
     entrada = ctx.manifest.registrar_etapa("provenance")
     entrada.metadata = {
         **entrada.metadata,
-        "assets": len(assets),
-        "render_allowed": len(permitidos),
-        "reference_only": len(referencias),
+        "sources": len(fuentes),
+        "decisions": len(decisiones),
+        "render_assets": len(permitidos),
+        "policy_version": VERSION_POLITICA,
+        **{f"class_{nombre}": total for nombre, total in por_clase.items()},
     }
     log_evento(
         ws.run_id, "provenance", "recorded",
-        assets=len(assets), render_allowed=len(permitidos),
-        reference_only=len(referencias),
+        sources=len(fuentes), decisions=len(decisiones),
+        render_assets=len(permitidos), policy_version=VERSION_POLITICA,
+        **{f"class_{nombre}": total for nombre, total in por_clase.items()},
     )
-    for ruta in referencias:
-        log_evento(ws.run_id, "provenance", "reference_only", asset=ruta)
+    for fuente in ledger.por_clase(ClaseFuente.solo_referencia):
+        log_evento(
+            ws.run_id, "provenance", "reference_only",
+            asset=fuente.asset_id, path=fuente.local_path,
+        )
+    for clase in (ClaseFuente.revision_pendiente, ClaseFuente.bloqueado):
+        for fuente in ledger.por_clase(clase):
+            decision = ledger.decision(fuente.asset_id)
+            log_evento(
+                ws.run_id, "provenance", clase.value,
+                asset=fuente.asset_id,
+                basis=decision.basis.value if decision else None,
+                reason=decision.reason if decision else None,
+            )
 
-    # El contrato rechaza el ledger si algo de referencia entrara aquí.
-    return ProvenanceLedger(run_id=ws.run_id, assets=assets, render_assets=permitidos)
+    return ledger
+
+
+def _huella_cambiada(fuente: SourceAsset, ws: Workspace) -> str | None:
+    """Motivo por el que la huella registrada ya no describe el archivo.
+
+    Devuelve ``None`` cuando no hay nada que objetar, incluido el caso de una
+    fuente sin archivo local: conocer solo la URL de algo es legítimo.
+
+    **Política de integridad**: una huella que no coincide *rechaza*, no pasa a
+    ``needs_review``. La decisión se tomó sobre un contenido concreto; si el
+    archivo cambió, la decisión ya no habla de lo que hay en disco, y degradarla
+    a «pendiente de revisión» dejaría en el ledger una decisión que parece
+    aplicable y no lo es.
+    """
+    if fuente.local_path is None or fuente.sha256 is None:
+        # Sin huella registrada no hay nada que contradecir. Es el caso de una
+        # referencia: se declara la ruta de algo que se consultó, que puede no
+        # estar en la corrida, y su contenido nunca respaldó una autorización.
+        return None
+    archivo = ws.ruta(fuente.local_path)
+    if not archivo.is_file():
+        return f"{fuente.local_path!r} tenía huella registrada y ya no existe"
+    actual = sha256_archivo(archivo)
+    if actual != fuente.sha256:
+        return (
+            f"{fuente.local_path!r} cambió: se registró {fuente.sha256[:12]}… y "
+            f"ahora es {actual[:12]}…"
+        )
+    return None
 
 
 def validar_procedencia(artefacto: ProvenanceLedger, ws: Workspace) -> None:
-    """Un recurso de render que desapareció invalida el ledger."""
+    """Un recurso de render que desapareció o cambió invalida el ledger."""
     for ruta in artefacto.render_assets:
         if not ws.ruta(ruta).is_file():
             raise ArtefactoCorrupto(
                 f"falta el recurso de render declarado {ruta!r}"
             )
+        fuente = artefacto.fuente_de(ruta)
+        if fuente is not None and (motivo := _huella_cambiada(fuente, ws)):
+            raise ArtefactoCorrupto(f"la procedencia ya no describe el archivo: {motivo}")
 
 
 def procedencia_vigente(artefacto: ProvenanceLedger, ctx: ContextoEtapa) -> None:
-    """El ledger debe cubrir exactamente los recursos de la corrida de ahora."""
-    voz = ctx.workspace.leer_artefacto(ARTEFACTO_VOZ, VoiceAsset)
-    subtitulos = ctx.workspace.leer_artefacto(ARTEFACTO_SUBTITULOS, SubtitleAsset)
-    overlay = ctx.workspace.leer_artefacto(ARTEFACTO_OVERLAY, OverlaySpec)
+    """El ledger debe describir la corrida de ahora, no la de antes."""
+    ws = ctx.workspace
 
-    esperados = {
-        voz.audio_path, subtitulos.srt_path, subtitulos.ass_path,
-        overlay.overlay_path,
-    }
-    if (material := _material_visual(ctx.workspace)) is not None:
-        esperados.add(material)
+    esperados = {ruta for _, ruta, _, _, _ in _propios(ctx)}
     if esperados - set(artefacto.render_assets):
         raise ArtefactoCorrupto(
             "el ledger no cubre todos los recursos propios de la corrida"
         )
-    declaradas = {r for r in _referencias(ctx)}
-    registradas = {
-        a.asset_path for a in artefacto.assets
-        if a.source_class is ClaseFuente.solo_referencia
-    }
+
+    declaradas = set(_referencias(ctx))
+    registradas = set(artefacto.rutas_por_clase(ClaseFuente.solo_referencia))
     if declaradas != registradas:
-        raise ArtefactoCorrupto(
-            "cambiaron los recursos declarados como referencia"
+        raise ArtefactoCorrupto("cambiaron los recursos declarados como referencia")
+
+    # Una fuente externa que se declara, se retira o se modifica cambia lo que el
+    # ledger afirma, aunque los recursos propios sigan iguales. Se compara el
+    # contenido, no el número: editar la base alegada de una fuente no cambia
+    # cuántas hay y sí cambia lo que el ledger autoriza.
+    def perfil(basis: BaseLicencia | None, fuente: SourceAsset) -> tuple:
+        datos = fuente.model_dump(mode="json", exclude={"created_at"})
+        return (basis.value if basis else None, tuple(sorted(datos.items(), key=repr)))
+
+    alegadas = {f.asset_id: perfil(b, f) for b, f in _fuentes_externas(ctx)}
+    registradas_ext = {
+        f.asset_id: perfil(
+            d.basis if (d := artefacto.decision(f.asset_id)) else None, f
         )
+        for f in artefacto.sources
+        if f.asset_id not in {f"{PREFIJO_PROPIO}:{p}" for p, *_ in _propios(ctx)}
+        and not f.asset_id.startswith("reference:")
+    }
+    if alegadas != registradas_ext:
+        raise ArtefactoCorrupto("cambiaron las fuentes externas declaradas")
+
+    # Una política nueva no puede dar por buenas las decisiones de la anterior:
+    # es exactamente el caso que policy_version existe para detectar.
+    anteriores = artefacto.versiones_de_politica() - {VERSION_POLITICA}
+    if anteriores:
+        raise ArtefactoCorrupto(
+            f"el ledger se decidió con la política {sorted(anteriores)} y ahora "
+            f"rige {VERSION_POLITICA}"
+        )
+
+    # Y la integridad: si cambió el contenido de algo registrado, la decisión
+    # sobre ese contenido ya no aplica.
+    for fuente in artefacto.sources:
+        if motivo := _huella_cambiada(fuente, ws):
+            raise ArtefactoCorrupto(f"la procedencia ya no describe el archivo: {motivo}")
 
 
 # ---------------------------------------------------------------------------

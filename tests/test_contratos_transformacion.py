@@ -13,11 +13,11 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
+from app.config.provenance import VERSION_POLITICA
 from app.contracts.models import (
     NOTA_EDITORIAL,
     SCHEMA_VERSION_TRANSFORMACION,
     TRANSFORMACIONES_OBLIGATORIAS,
-    AssetProvenance,
     BaseLicencia,
     ClaseFuente,
     ComprobacionQA,
@@ -25,10 +25,15 @@ from app.contracts.models import (
     EstadoQA,
     EstadoValidacion,
     EvaluacionEditorialLegal,
+    Evidence,
+    LicenseDecision,
     NivelQA,
     OverlaySpec,
     ProvenanceLedger,
     QAResult,
+    SourceAsset,
+    TipoEvidencia,
+    TipoMedio,
     TipoTransformacion,
     TransformationElement,
     TransformationSet,
@@ -37,33 +42,81 @@ from app.contracts.models import (
 PROPIO = "voice/narration.mp3"
 REFERENCIA = "reference/fuente.mp4"
 
+ID_PROPIO = "pipeline:narration"
+ID_REFERENCIA = "reference:0"
 
-def _propio(**extra) -> AssetProvenance:
+
+def _evidencia(**extra) -> Evidence:
     base = dict(
-        asset_path=PROPIO,
-        source_class=ClaseFuente.render_permitido,
+        evidence_id="ev-propia",
+        kind=TipoEvidencia.registro_propiedad,
+        reference="voice_asset.json",
+        description="el artefacto que registra cómo se generó",
+    )
+    base.update(extra)
+    return Evidence(**base)
+
+
+def _propio(**extra) -> SourceAsset:
+    base = dict(
+        run_id=uuid.uuid4(),
+        asset_id=ID_PROPIO,
+        media_kind=TipoMedio.audio,
+        origin="shorts-automation pipeline",
+        local_path=PROPIO,
+        evidence=[_evidencia()],
+    )
+    base.update(extra)
+    return SourceAsset(**base)
+
+
+def _referencia(**extra) -> SourceAsset:
+    base = dict(
+        run_id=uuid.uuid4(),
+        asset_id=ID_REFERENCIA,
+        media_kind=TipoMedio.otro,
+        origin="declarado como referencia en la entrada de la corrida",
+        local_path=REFERENCIA,
+    )
+    base.update(extra)
+    return SourceAsset(**base)
+
+
+def _decision(**extra) -> LicenseDecision:
+    base = dict(
+        run_id=uuid.uuid4(),
+        asset_id=ID_PROPIO,
+        decision=ClaseFuente.render_permitido,
         basis=BaseLicencia.propia,
-        evidence_ref="generado por este pipeline",
-        description="narración propia",
+        evidence_ids=["ev-propia"],
+        reason="recurso generado por el pipeline, con su artefacto como respaldo",
+        policy_version=VERSION_POLITICA,
     )
     base.update(extra)
-    return AssetProvenance(**base)
+    return LicenseDecision(**base)
 
 
-def _referencia(**extra) -> AssetProvenance:
+def _decision_referencia(**extra) -> LicenseDecision:
     base = dict(
-        asset_path=REFERENCIA,
-        source_class=ClaseFuente.solo_referencia,
-        basis=BaseLicencia.ninguna,
-        evidence_ref="consultado para el análisis temático",
-        description="material de referencia",
+        run_id=uuid.uuid4(),
+        asset_id=ID_REFERENCIA,
+        decision=ClaseFuente.solo_referencia,
+        basis=BaseLicencia.desconocida,
+        reason="declarado como referencia editorial",
+        policy_version=VERSION_POLITICA,
+        decided_by="declaration",
     )
     base.update(extra)
-    return AssetProvenance(**base)
+    return LicenseDecision(**base)
 
 
 def _ledger(**extra) -> ProvenanceLedger:
-    base = dict(run_id=uuid.uuid4(), assets=[_propio()], render_assets=[PROPIO])
+    base = dict(
+        run_id=uuid.uuid4(),
+        sources=[_propio()],
+        decisions=[_decision()],
+        render_assets=[PROPIO],
+    )
     base.update(extra)
     return ProvenanceLedger(**base)
 
@@ -140,9 +193,11 @@ def test_campo_desconocido_es_rechazado():
 # ---------------------------------------------------------------------------
 
 
-def test_las_dos_clases_de_procedencia_existen():
+def test_las_cuatro_clases_de_procedencia_existen():
     assert ClaseFuente.render_permitido.value == "render_allowed"
     assert ClaseFuente.solo_referencia.value == "reference_only"
+    assert ClaseFuente.revision_pendiente.value == "needs_review"
+    assert ClaseFuente.bloqueado.value == "blocked"
 
 
 def test_un_recurso_render_allowed_se_acepta():
@@ -159,65 +214,98 @@ def test_un_recurso_reference_only_queda_bloqueado_por_el_contrato():
     un recurso de referencia aparece entre los utilizables para el render.
     """
     with pytest.raises(ValidationError, match="reference_only"):
-        _ledger(assets=[_propio(), _referencia()], render_assets=[PROPIO, REFERENCIA])
+        _ledger(
+            sources=[_propio(), _referencia()],
+            decisions=[_decision(), _decision_referencia()],
+            render_assets=[PROPIO, REFERENCIA],
+        )
 
 
 def test_un_recurso_reference_only_puede_existir_en_el_run():
     """Puede estar registrado; lo que no puede es usarse en el render."""
-    ledger = _ledger(assets=[_propio(), _referencia()], render_assets=[PROPIO])
+    ledger = _ledger(
+        sources=[_propio(), _referencia()],
+        decisions=[_decision(), _decision_referencia()],
+        render_assets=[PROPIO],
+    )
     assert ledger.clase(REFERENCIA) is ClaseFuente.solo_referencia
     assert not ledger.permite_render(REFERENCIA)
     assert REFERENCIA not in ledger.render_assets
 
 
 def test_reference_only_no_se_convierte_en_render_allowed_solo_por_listarlo():
-    """No hay promoción automática: hay que cambiar su clase declarada."""
+    """No hay promoción automática: hace falta otra decisión."""
     with pytest.raises(ValidationError):
-        _ledger(assets=[_referencia()], render_assets=[REFERENCIA])
+        _ledger(
+            sources=[_referencia()],
+            decisions=[_decision_referencia()],
+            render_assets=[REFERENCIA],
+        )
 
 
 def test_un_recurso_sin_declarar_no_puede_usarse_en_el_render():
     with pytest.raises(ValidationError, match="sin procedencia declarada"):
-        _ledger(assets=[_propio()], render_assets=[PROPIO, "overlay/overlay.ass"])
+        _ledger(render_assets=[PROPIO, "overlay/overlay.ass"])
 
 
 def test_la_restriccion_no_depende_del_nombre_del_archivo():
     """Un recurso llamado "propio" sigue bloqueado si se declaró de referencia."""
-    enganoso = _referencia(asset_path="voice/narration_propia_original.mp3")
+    enganoso = _referencia(local_path="voice/narration_propia_original.mp3")
     with pytest.raises(ValidationError, match="reference_only"):
-        _ledger(assets=[enganoso], render_assets=[enganoso.asset_path])
+        _ledger(
+            sources=[enganoso],
+            decisions=[_decision_referencia()],
+            render_assets=[enganoso.local_path],
+        )
 
 
 def test_un_recurso_declarado_dos_veces_es_rechazado():
     with pytest.raises(ValidationError, match="dos veces"):
-        _ledger(assets=[_propio(), _propio(description="otra cosa")])
+        _ledger(sources=[_propio(), _propio(local_path="otro/sitio.mp3")])
+
+
+def test_dos_fuentes_sobre_el_mismo_archivo_son_rechazadas():
+    """Su clase sería ambigua, y una clase ambigua en la puerta es una puerta
+    abierta."""
+    with pytest.raises(ValidationError, match="dos fuentes"):
+        _ledger(sources=[_propio(), _propio(asset_id="pipeline:otro")])
 
 
 def test_la_procedencia_rechaza_rutas_absolutas():
     with pytest.raises(ValidationError):
-        _propio(asset_path="/home/runner/work/runs/voice/narration.mp3")
+        _propio(local_path="/home/runner/work/runs/voice/narration.mp3")
     with pytest.raises(ValidationError):
         _ledger(render_assets=["/tmp/narration.mp3"])
 
 
-def test_la_procedencia_exige_evidencia_y_descripcion():
+def test_la_evidencia_exige_referencia_y_descripcion():
     with pytest.raises(ValidationError):
-        _propio(evidence_ref="   ")
+        _evidencia(reference="   ")
     with pytest.raises(ValidationError):
-        _propio(description="")
+        _evidencia(description="")
+    with pytest.raises(ValidationError):
+        _propio(origin="  ")
 
 
 def test_un_ledger_vacio_es_valido_pero_no_permite_nada():
-    ledger = _ledger(assets=[], render_assets=[])
+    ledger = _ledger(sources=[], decisions=[], render_assets=[])
     assert ledger.clase(PROPIO) is None
     assert not ledger.permite_render(PROPIO)
 
 
 @pytest.mark.parametrize("base", list(BaseLicencia))
 def test_cualquier_base_de_licencia_es_representable(base):
-    """G4 registra la procedencia; no resuelve la cuestión legal."""
-    ledger = _ledger(assets=[_propio(basis=base)], render_assets=[PROPIO])
-    assert ledger.assets[0].basis is base
+    """El ledger registra la procedencia; no resuelve la cuestión legal.
+
+    Incluidas las que nunca habilitan el render: poder representar ``unknown`` y
+    ``fair_use_claim`` es justamente lo que evita tener que mentir sobre ellas.
+    """
+    ledger = _ledger(
+        decisions=[_decision(decision=ClaseFuente.revision_pendiente, basis=base)],
+        render_assets=[],
+    )
+    assert ledger.decisions[0].basis is base
+    assert not ledger.permite_render(PROPIO)
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +545,11 @@ def test_el_bloqueo_sobrevive_a_la_ida_y_vuelta():
     """Un ledger manipulado a mano en el JSON tampoco se acepta al releerlo."""
     import json
 
-    ledger = _ledger(assets=[_propio(), _referencia()], render_assets=[PROPIO])
+    ledger = _ledger(
+        sources=[_propio(), _referencia()],
+        decisions=[_decision(), _decision_referencia()],
+        render_assets=[PROPIO],
+    )
     datos = json.loads(ledger.model_dump_json())
     datos["render_assets"].append(REFERENCIA)
 

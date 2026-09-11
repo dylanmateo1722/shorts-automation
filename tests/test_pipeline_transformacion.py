@@ -13,6 +13,7 @@ import uuid
 import pytest
 
 from app.adapters.tts import ProveedorTTSFalso
+from app.config.provenance import VERSION_POLITICA
 from app.contracts.models import (
     AdaptedScript,
     ClaseFuente,
@@ -30,7 +31,7 @@ from app.core.manifest import EstadoEtapa, Manifest
 from app.core.stage_runner import StageRunner
 from app.pipeline import qa as modulo_qa
 from app.pipeline import transformation, voice
-from tests.conftest import construir_guion
+from tests.conftest import construir_guion, reclasificar
 
 
 @pytest.fixture
@@ -115,7 +116,7 @@ def test_todas_las_rutas_guardadas_son_relativas(runner, workspace_voz):
 
     rutas = (
         [overlay.overlay_path, overlay.source_text_reference]
-        + [a.asset_path for a in ledger.assets]
+        + [f.local_path for f in ledger.sources if f.local_path]
         + [e.asset_ref for e in conjunto.elements]
     )
     for ruta in rutas:
@@ -167,7 +168,9 @@ def test_los_recursos_propios_quedan_como_render_allowed(runner, workspace_voz):
     subtitulos = workspace_voz.leer_artefacto(voice.ARTEFACTO_SUBTITULOS, SubtitleAsset)
     for ruta in (voz.audio_path, subtitulos.srt_path, subtitulos.ass_path):
         assert ledger.permite_render(ruta), ruta
-    assert all(a.basis.value == "own" for a in ledger.assets)
+    assert all(d.basis.value == "own" for d in ledger.decisions)
+    # Y cada uno con su evidencia: la autorización no se sostiene sin ella.
+    assert all(f.evidence for f in ledger.sources)
 
 
 def test_un_recurso_de_referencia_se_registra_y_queda_fuera_del_render(runner):
@@ -217,17 +220,7 @@ def test_un_elemento_sobre_material_de_referencia_se_bloquea(runner, workspace_v
         transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger
     )
     voz = workspace_voz.leer_artefacto(voice.ARTEFACTO_VOZ, VoiceAsset)
-    degradado = ledger.model_copy(
-        update={
-            "assets": [
-                a.model_copy(update={"source_class": ClaseFuente.solo_referencia})
-                if a.asset_path == voz.audio_path
-                else a
-                for a in ledger.assets
-            ],
-            "render_assets": [r for r in ledger.render_assets if r != voz.audio_path],
-        }
-    )
+    degradado = reclasificar(ledger, voz.audio_path, ClaseFuente.solo_referencia)
     workspace_voz.escribir_artefacto(transformation.ARTEFACTO_PROCEDENCIA, degradado)
     runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
 
@@ -512,8 +505,10 @@ def test_el_manifest_registra_los_recursos_bloqueados(runner):
     runner.ejecutar(transformation.ETAPA_PROCEDENCIA)
 
     metadata = runner.manifest.etapa("provenance").metadata
-    assert metadata["reference_only"] == 1
-    assert metadata["render_allowed"] == 4
+    assert metadata["class_reference_only"] == 1
+    assert metadata["class_render_allowed"] == 4
+    assert metadata["render_assets"] == 4
+    assert metadata["policy_version"] == VERSION_POLITICA
 
 
 def test_el_manifest_no_guarda_secretos(runner, workspace_voz, monkeypatch):
@@ -573,7 +568,7 @@ def test_declarar_una_referencia_nueva_invalida_el_ledger(runner):
     _con_referencia(runner)
     resultado = runner.ejecutar(transformation.ETAPA_PROCEDENCIA)
     assert not resultado.omitida
-    assert len(resultado.artefacto.assets) == 5
+    assert len(resultado.artefacto.sources) == 5
 
 
 def test_regenerar_el_ledger_invalida_la_transformacion(runner):

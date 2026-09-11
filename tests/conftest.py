@@ -310,3 +310,78 @@ def workspace_e2e(tmp_path, settings_e2e, corrida_base) -> Workspace:
     destino.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(corrida_base["dir"], destino)
     return Workspace(settings_e2e.raiz_runs, corrida_base["run_id"])
+
+
+# ---------------------------------------------------------------------------
+# Manipulación de ledgers para provocar los casos bloqueados
+# ---------------------------------------------------------------------------
+
+
+def reclasificar(ledger, ruta: str, clase, *, basis=None):
+    """Copia del ledger con otra decisión sobre el recurso de esa ruta.
+
+    Es la forma de provocar en un test los casos que el pipeline no produce por
+    sí mismo: todo lo que genera sale ``render_allowed``, así que para comprobar
+    que un recurso ``blocked`` no llega al motor hay que degradarlo a mano, como
+    lo haría alguien editando el JSON.
+
+    La ruta sale de ``render_assets`` porque el contrato se niega a validar un
+    ledger que autorice para el render algo que no está autorizado; el punto de
+    estos tests es lo que pasa **después**, en la puerta.
+    """
+    from app.contracts.models import ClaseFuente
+
+    decisiones = []
+    objetivo = ledger.fuente_de(ruta)
+    for decision in ledger.decisions:
+        if objetivo is not None and decision.asset_id == objetivo.asset_id:
+            cambios = {
+                "decision": clase,
+                "reason": f"degradado a {clase.value} por el test",
+            }
+            if basis is not None:
+                cambios["basis"] = basis
+            if clase is not ClaseFuente.render_permitido:
+                # Una decisión que no autoriza no necesita invocar evidencia, y
+                # dejarla puesta confundiría el motivo del rechazo.
+                cambios["evidence_ids"] = []
+            decision = decision.model_copy(update=cambios)
+        decisiones.append(decision)
+
+    return ledger.model_copy(
+        update={
+            "decisions": decisiones,
+            "render_assets": [r for r in ledger.render_assets if r != ruta],
+        }
+    )
+
+
+def sin_decision(ledger, ruta: str):
+    """Copia del ledger donde la fuente de esa ruta queda registrada sin decidir."""
+    objetivo = ledger.fuente_de(ruta)
+    return ledger.model_copy(
+        update={
+            "decisions": [
+                d
+                for d in ledger.decisions
+                if objetivo is None or d.asset_id != objetivo.asset_id
+            ],
+            "render_assets": [r for r in ledger.render_assets if r != ruta],
+        }
+    )
+
+
+def sin_fuente(ledger, ruta: str):
+    """Copia del ledger donde el recurso de esa ruta no está declarado."""
+    objetivo = ledger.fuente_de(ruta)
+    return ledger.model_copy(
+        update={
+            "sources": [f for f in ledger.sources if f.local_path != ruta],
+            "decisions": [
+                d
+                for d in ledger.decisions
+                if objetivo is None or d.asset_id != objetivo.asset_id
+            ],
+            "render_assets": [r for r in ledger.render_assets if r != ruta],
+        }
+    )

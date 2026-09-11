@@ -416,18 +416,34 @@ def _comprobar_procedencia(
 ) -> None:
     acc.error(
         "procedencia: hay recursos declarados",
-        bool(ledger.assets),
-        f"{len(ledger.assets)} recurso(s), {len(ledger.render_assets)} utilizable(s) "
-        f"en el render",
+        bool(ledger.sources),
+        f"{len(ledger.sources)} fuente(s), {len(ledger.decisions)} decisión(es), "
+        f"{len(ledger.render_assets)} utilizable(s) en el render",
     )
 
     colados = [
         ruta for ruta in ledger.render_assets if not ledger.permite_render(ruta)
     ]
     acc.error(
-        "procedencia: ningún recurso de referencia entre los del render",
+        "procedencia: ningún recurso no autorizado entre los del render",
         not colados,
-        "ninguno" if not colados else f"recursos de referencia en el render: {colados}",
+        "ninguno" if not colados else f"recursos no autorizados en el render: {colados}",
+    )
+
+    sin_decidir = ledger.sin_decidir()
+    acc.error(
+        "procedencia: toda fuente tiene una decisión de licencia",
+        not sin_decidir,
+        "todas decididas" if not sin_decidir else f"sin decidir: {sin_decidir}",
+    )
+
+    politicas = sorted(ledger.versiones_de_politica())
+    acc.error(
+        "procedencia: las decisiones registran su versión de política",
+        len(politicas) == 1,
+        f"política {politicas[0]}"
+        if len(politicas) == 1
+        else f"versiones de política mezcladas o ausentes: {politicas}",
     )
 
     sin_declarar = [
@@ -447,11 +463,13 @@ def _comprobar_procedencia(
     for ruta in ledger.render_assets:
         _archivo(acc, ws, f"procedencia: existe el recurso {ruta}", ruta)
 
-    referencias = [
-        a.asset_path
-        for a in ledger.assets
-        if a.source_class is ClaseFuente.solo_referencia
-    ]
+    # Se identifica por la ruta cuando la hay: es lo que alguien auditando el
+    # informe puede ir a mirar. Una fuente de la que solo se conoce la URL no
+    # tiene ruta, y entonces el identificador es lo único que la señala.
+    def etiquetar(fuente) -> str:
+        return fuente.local_path or fuente.asset_id
+
+    referencias = [etiquetar(f) for f in ledger.por_clase(ClaseFuente.solo_referencia)]
     acc.aviso(
         "procedencia: recursos solo de referencia",
         not referencias,
@@ -461,11 +479,57 @@ def _comprobar_procedencia(
         f"render: {referencias}",
     )
 
-    sin_evidencia = [a.asset_path for a in ledger.assets if not a.evidence_ref.strip()]
+    for clase, etiqueta in (
+        (ClaseFuente.revision_pendiente, "pendientes de revisión"),
+        (ClaseFuente.bloqueado, "bloqueados"),
+    ):
+        afectados = [etiquetar(f) for f in ledger.por_clase(clase)]
+        acc.aviso(
+            f"procedencia: recursos {etiqueta}",
+            not afectados,
+            "ninguno"
+            if not afectados
+            else f"{len(afectados)} recurso(s) {etiqueta}, fuera del render: {afectados}",
+        )
+
+    # La evidencia se exige donde decide algo: lo que entra al render. Una
+    # referencia no necesita respaldo de licencia porque no se va a utilizar como
+    # material, y exigírselo insinuaría que con respaldo podría entrar.
+    sin_evidencia = [
+        fuente.asset_id
+        for fuente in ledger.por_clase(ClaseFuente.render_permitido)
+        if not fuente.evidence
+    ]
     acc.error(
-        "procedencia: cada recurso indica su evidencia",
+        "procedencia: todo recurso autorizado aporta evidencia",
         not sin_evidencia,
         "todos" if not sin_evidencia else f"sin evidencia: {sin_evidencia}",
+    )
+
+    sin_huella = [
+        ruta
+        for ruta in ledger.render_assets
+        if (f := ledger.fuente_de(ruta)) is not None and f.sha256 is None
+    ]
+    acc.error(
+        "procedencia: todo recurso del render tiene huella registrada",
+        not sin_huella,
+        "todos" if not sin_huella else f"sin huella: {sin_huella}",
+    )
+
+    # La atribución que una licencia exige tiene que estar escrita por alguien.
+    # El sistema no la inventa, así que la QA solo comprueba que esté.
+    sin_atribucion = [
+        fuente.asset_id
+        for fuente in ledger.por_clase(ClaseFuente.render_permitido)
+        if fuente.attribution_required and not (fuente.attribution_text or "").strip()
+    ]
+    acc.error(
+        "procedencia: toda atribución exigida tiene texto",
+        not sin_atribucion,
+        "sin pendientes"
+        if not sin_atribucion
+        else f"exigen atribución sin texto: {sin_atribucion}",
     )
 
 

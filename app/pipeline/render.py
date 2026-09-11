@@ -191,26 +191,52 @@ def verificar_procedencia(
     Se ejecuta **antes** de invocar el motor. Un recurso de referencia que
     llegara al render ya no se puede deshacer: el vídeo estaría hecho.
 
-    La decisión no mira el nombre del archivo. Mira la clase que el ledger
-    declara, y un recurso sin declarar se trata como no autorizado en vez de
-    como un descuido tolerable.
+    Lo que exige de cada recurso, en este orden: que una fuente del ledger lo
+    declare; que esa fuente tenga una decisión de licencia; que la decisión sea
+    ``render_allowed``; que el archivo exista; y que su contenido sea el mismo
+    sobre el que se decidió. Solo entonces el motor puede ejecutarse.
+
+    No mira el nombre del archivo en ningún momento, y un recurso sin declarar se
+    trata como no autorizado en vez de como un descuido tolerable.
+
+    ``render_allowed`` aquí significa que la política técnica lo permite. No
+    significa que el material esté libre de reclamaciones: ese juicio es humano y
+    vive en ``QAResult.editorial_legal_assessment``.
     """
     for ruta in rutas:
-        clase = ledger.clase(ruta)
-        if clase is None:
+        fuente = ledger.fuente_de(ruta)
+        if fuente is None:
             raise ProcedenciaInvalida(
                 f"{ruta!r} entraría al render sin procedencia declarada",
                 stage=etapa,
             )
-        if clase is not ClaseFuente.render_permitido:
+        decision = ledger.decision(fuente.asset_id)
+        if decision is None:
             raise ProcedenciaInvalida(
-                f"{ruta!r} está clasificado {clase.value!r} y no puede entrar al "
-                f"render; sirve como referencia editorial, no como material",
+                f"{ruta!r} entraría al render sin ninguna decisión de licencia; "
+                f"la fuente {fuente.asset_id!r} está registrada pero sin decidir",
                 stage=etapa,
             )
-        if not ws.ruta(ruta).is_file():
+        if decision.decision is not ClaseFuente.render_permitido:
+            raise ProcedenciaInvalida(
+                f"{ruta!r} está clasificado {decision.decision.value!r} y no puede "
+                f"entrar al render: {decision.reason}",
+                stage=etapa,
+            )
+        archivo = ws.ruta(ruta)
+        if not archivo.is_file():
             raise ProcedenciaInvalida(
                 f"{ruta!r} está autorizado pero el archivo no existe", stage=etapa
+            )
+        # Integridad: la decisión se tomó sobre un contenido concreto. Si el
+        # archivo ya no es ese, la autorización no habla de lo que hay en disco y
+        # se rechaza —no se degrada a needs_review, porque una decisión que
+        # parece aplicable y no lo es es peor que ninguna.
+        if fuente.sha256 is not None and sha256_archivo(archivo) != fuente.sha256:
+            raise ProcedenciaInvalida(
+                f"{ruta!r} cambió desde que se autorizó: la huella registrada "
+                f"{fuente.sha256[:12]}… no corresponde al archivo actual",
+                stage=etapa,
             )
 
 
@@ -266,11 +292,10 @@ def construir_job(ctx: ContextoEtapa) -> RenderJob:
         "composition": job.composition,
         "engine_commit": job.engine_commit,
         "transformation_elements": sorted(t.value for t in conjunto.tipos),
-        "reference_only_blocked": [
-            a.asset_path
-            for a in ledger.assets
-            if a.source_class is ClaseFuente.solo_referencia
-        ],
+        "policy_version": sorted(ledger.versiones_de_politica()),
+        "reference_only_blocked": ledger.rutas_por_clase(ClaseFuente.solo_referencia),
+        "needs_review_blocked": ledger.rutas_por_clase(ClaseFuente.revision_pendiente),
+        "blocked": ledger.rutas_por_clase(ClaseFuente.bloqueado),
     }
     log_evento(
         ws.run_id, "render_job", "authorized",

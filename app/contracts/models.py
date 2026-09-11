@@ -130,29 +130,58 @@ class ProcedenciaIA(BaseModel):
 class ClaseFuente(str, Enum):
     """Qué se puede hacer con un recurso.
 
-    ``reference_only`` informa el tema y el análisis, pero su material no
-    puede aparecer en el render. ``render_allowed`` sí puede, porque existe una
-    base de procedencia registrada.
+    ``reference_only`` informa el tema y el análisis, pero su material no puede
+    aparecer en el render. ``render_allowed`` sí puede, porque existe una base de
+    procedencia registrada **y** la evidencia que la política exige.
+
+    ``needs_review`` y ``blocked`` existen para no tener que mentir cuando no se
+    sabe: lo primero es «falta información para decidir», lo segundo «se decidió
+    que no». Ninguno de los dos entra al render, y esa es la diferencia con
+    ``render_allowed``, que es la única clase que lo permite.
+
+    **``render_allowed`` no significa «legalmente certificado».** Significa que
+    la procedencia registrada satisface la política técnica del sistema. Ver
+    ``LicenseDecision``.
 
     La distinción se aplica por contrato, no por convención de nombres de
-    archivo: ver ``ProvenanceLedger``, que se niega a validar si un recurso de
-    referencia aparece entre los utilizables para el render.
+    archivo: ver ``ProvenanceLedger``, que se niega a validar si algo que no sea
+    ``render_allowed`` aparece entre los utilizables para el render.
     """
 
     render_permitido = "render_allowed"
     solo_referencia = "reference_only"
+    revision_pendiente = "needs_review"
+    bloqueado = "blocked"
 
 
 class BaseLicencia(str, Enum):
+    """Sobre qué se apoya el derecho a usar un recurso.
+
+    Conjunto controlado a propósito. ``cc_by`` y no «creative commons» porque
+    la familia no dice nada: hay licencias CC que prohíben el uso comercial y
+    otras que lo permiten, así que la licencia concreta tiene que quedar
+    registrada. ``unknown`` y ``fair_use_claim`` existen para poder representar
+    la ignorancia y la afirmación sin resolverlas: **ninguna de las dos habilita
+    el render por sí sola**, y el sistema no implementa ningún evaluador de uso
+    legítimo.
+    """
+
     propia = "own"
-    creative_commons = "creative_commons"
-    stock = "stock"
-    permiso_escrito = "written_permission"
-    ninguna = "none"
+    licenciada = "licensed"
+    cc_by = "cc_by"
+    dominio_publico = "public_domain"
+    permiso = "permission"
+    desconocida = "unknown"
+    uso_legitimo_alegado = "fair_use_claim"
 
 
 class Candidate(Artefacto):
-    """Un Short localizado como posible fuente o referencia."""
+    """Un Short localizado como posible fuente o referencia.
+
+    Conocer su URL no implica poder renderizarlo. Un candidato se registra como
+    ``SourceAsset`` y su clase la decide la política, nunca el hecho de haberlo
+    encontrado.
+    """
 
     video_id: str
     title: str
@@ -167,30 +196,161 @@ class Candidate(Artefacto):
     score_basis: str | None = None
 
 
-class LicenseDecision(Artefacto):
-    """Decisión bloqueante sobre el uso de una fuente."""
-
-    source_class: ClaseFuente
-    basis: BaseLicencia
-    evidence_ref: str
-    decided_at: datetime = Field(default_factory=_ahora)
-    decided_by: str
-
-
 # ---------------------------------------------------------------------------
-# Material y texto
+# Procedencia: fuente, evidencia y decisión
 # ---------------------------------------------------------------------------
+
+
+#: Bases que jamás habilitan el render por sí solas. ``unknown`` es ignorancia y
+#: ``fair_use_claim`` es una afirmación sin resolver; convertir cualquiera de las
+#: dos en autorización automática sería inventar una certeza que nadie tiene.
+BASES_NUNCA_RENDERIZABLES = frozenset(
+    {BaseLicencia.desconocida, BaseLicencia.uso_legitimo_alegado}
+)
+
+
+class TipoMedio(str, Enum):
+    video = "video"
+    audio = "audio"
+    imagen = "image"
+    texto = "text"
+    subtitulos = "subtitles"
+    otro = "other"
+
+
+class TipoEvidencia(str, Enum):
+    """Qué clase de respaldo se está apuntando.
+
+    El sistema no verifica el documento: registra que existe y dónde mirarlo
+    para que una persona pueda auditarlo.
+    """
+
+    pagina_licencia = "license_page"
+    documento_permiso = "permission_document"
+    registro_propiedad = "ownership_record"
+    registro_dominio_publico = "public_domain_record"
+    registro_licencia_cc = "cc_license_record"
+    otra = "other"
+
+
+class Evidence(BaseModel):
+    """Un respaldo trazable de la procedencia de un recurso.
+
+    No es un gestor documental: es una referencia auditable. ``reference`` puede
+    ser una URL, un identificador de factura o una ruta; lo que **no** debe ser
+    es un secreto. Si el respaldo vive detrás de una credencial, aquí va el
+    puntero, nunca la credencial.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: TextoNoVacio
+    kind: TipoEvidencia
+    reference: TextoNoVacio
+    description: TextoNoVacio
+    obtained_at: datetime | None = None
+    issued_by: str | None = None
 
 
 class SourceAsset(Artefacto):
-    """Material de origen ya adquirido y preparado para transcribir."""
+    """Un recurso del que el pipeline sabe algo, con su procedencia.
 
-    audio_path: str
-    video_path: str | None = None
-    duration_s: float
-    sample_rate: int
-    language_hint: str | None = None
-    license_ref: str | None = None
+    Cubre por igual lo que produce el propio pipeline y lo que viene de fuera.
+    ``asset_id`` es la identidad estable: el resto —ruta, hash— puede cambiar,
+    y cuando cambia hay que volver a decidir.
+
+    ``local_path`` es opcional porque una fuente puede conocerse sin tenerla
+    descargada: un Short ajeno del que solo se sabe la URL es una fuente
+    perfectamente registrable, y precisamente por eso su clase la decide la
+    política y no el hecho de conocerlo.
+
+    ``sha256`` ancla la decisión a un contenido concreto. Si el archivo cambia,
+    la decisión dejó de hablar de lo que hay en disco.
+    """
+
+    asset_id: TextoNoVacio
+    media_kind: TipoMedio
+    origin: TextoNoVacio
+    source_url: str | None = None
+    local_path: RutaRelativa | None = None
+    sha256: Sha256Hex | None = None
+    obtained_at: datetime | None = None
+    evidence: list[Evidence] = Field(default_factory=list)
+    attribution_required: bool = False
+    attribution_text: str | None = None
+    attribution_source: str | None = None
+    license_id: str | None = None
+    commercial_use_allowed: bool | None = None
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def _comprobar_fuente(self) -> "SourceAsset":
+        vistos: set[str] = set()
+        for evidencia in self.evidence:
+            if evidencia.evidence_id in vistos:
+                raise ValueError(
+                    f"evidencia duplicada: {evidencia.evidence_id!r}"
+                )
+            vistos.add(evidencia.evidence_id)
+        if self.sha256 is not None and self.local_path is None:
+            raise ValueError(
+                "hay huella sin archivo al que corresponda: sha256 exige local_path"
+            )
+        # Una atribución exigida sin texto **sí** es representable: es el estado
+        # real de quien sabe que la licencia pide crédito y aún no lo ha escrito.
+        # Prohibirlo aquí obligaría a mentir —declarar que no hace falta— o a
+        # inventar el crédito. La política lo clasifica ``needs_review`` y el
+        # ledger se niega a autorizar su render, que es donde importa.
+        return self
+
+    def evidencia(self, evidence_id: str) -> Evidence | None:
+        for evidencia in self.evidence:
+            if evidencia.evidence_id == evidence_id:
+                return evidencia
+        return None
+
+
+class LicenseDecision(Artefacto):
+    """Decisión explícita sobre qué se puede hacer con un ``SourceAsset``.
+
+    **``render_allowed`` no es una certificación legal.** Significa que la
+    procedencia registrada y la evidencia disponible satisfacen la política
+    técnica identificada por ``policy_version``. No afirma ausencia de
+    reclamaciones de copyright, ni compatibilidad con Content ID, ni derecho a
+    monetizar, ni constituye asesoramiento jurídico. Ese juicio es humano y vive
+    aparte, en ``QAResult.editorial_legal_assessment``.
+
+    El contrato rechaza las combinaciones que se contradicen a sí mismas: no se
+    puede autorizar un render sobre una base desconocida, sobre un uso legítimo
+    alegado, sobre un permiso sin documento, ni sobre una atribución exigida que
+    nadie escribió.
+    """
+
+    asset_id: TextoNoVacio
+    decision: ClaseFuente
+    basis: BaseLicencia
+    evidence_ids: list[str] = Field(default_factory=list)
+    reason: TextoNoVacio
+    policy_version: TextoNoVacio
+    decided_at: datetime = Field(default_factory=_ahora)
+    decided_by: TextoNoVacio = "provenance_policy"
+
+    @model_validator(mode="after")
+    def _comprobar_coherencia(self) -> "LicenseDecision":
+        if self.decision is not ClaseFuente.render_permitido:
+            return self
+
+        if self.basis in BASES_NUNCA_RENDERIZABLES:
+            raise ValueError(
+                f"no se puede autorizar el render de {self.asset_id!r} con base "
+                f"{self.basis.value!r}: exige una decisión humana, no automática"
+            )
+        if not self.evidence_ids:
+            raise ValueError(
+                f"no se puede autorizar el render de {self.asset_id!r} sin ninguna "
+                f"evidencia; 'allowed = true' no es una base de procedencia"
+            )
+        return self
 
 
 class SegmentoTexto(BaseModel):
@@ -530,70 +690,166 @@ class SubtitleAsset(ArtefactoVoz):
         return self
 
 
-class AssetProvenance(BaseModel):
-    """De dónde viene un recurso y qué se puede hacer con él.
-
-    ``evidence_ref`` no se valida legalmente aquí: es el puntero a la evidencia
-    —un recibo de stock, una URL de licencia, "generado por el pipeline"— que
-    una persona podrá auditar. Registrarlo no equivale a haber verificado la
-    licencia.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    asset_path: RutaRelativa
-    source_class: ClaseFuente
-    basis: BaseLicencia
-    evidence_ref: TextoNoVacio
-    description: TextoNoVacio
-
-
 class ProvenanceLedger(ArtefactoTransformacion):
-    """Qué recursos tiene la corrida y cuáles puede tocar el render.
+    """El registro auditable de la corrida: fuentes, evidencia y decisiones.
 
-    ``render_assets`` no es informativo: el contrato **se niega a validar** si
-    contiene un recurso que ``assets`` declara ``reference_only``, o uno que no
-    declara en absoluto. Es la forma estructural de la restricción; no depende
-    de que ninguna etapa se acuerde de comprobarla ni de cómo se llame el
-    archivo.
+    La cadena es ``SourceAsset → Evidence → LicenseDecision``. Las fuentes dicen
+    qué hay y de dónde viene; la evidencia, dónde mirar para comprobarlo; la
+    decisión, qué se puede hacer con ello y bajo qué versión de política.
+
+    ``render_assets`` no es informativo. El contrato **se niega a validar** si
+    contiene la ruta de un recurso sin decisión, con una decisión que no sea
+    ``render_allowed``, o que ninguna fuente declara. Es la forma estructural de
+    la restricción: no depende de que ninguna etapa se acuerde de comprobarla, ni
+    de cómo se llame el archivo.
+
+    Que un recurso esté en ``render_assets`` **no certifica nada legalmente**.
+    Certifica que la política técnica identificada en su decisión lo permitió.
     """
 
-    assets: list[AssetProvenance] = Field(default_factory=list)
+    sources: list[SourceAsset] = Field(default_factory=list)
+    decisions: list[LicenseDecision] = Field(default_factory=list)
     render_assets: list[RutaRelativa] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _comprobar_procedencia(self) -> "ProvenanceLedger":
-        por_ruta: dict[str, AssetProvenance] = {}
-        for asset in self.assets:
-            if asset.asset_path in por_ruta:
-                raise ValueError(f"recurso declarado dos veces: {asset.asset_path!r}")
-            por_ruta[asset.asset_path] = asset
+        por_id: dict[str, SourceAsset] = {}
+        por_ruta: dict[str, str] = {}
+        for fuente in self.sources:
+            if fuente.asset_id in por_id:
+                raise ValueError(f"fuente declarada dos veces: {fuente.asset_id!r}")
+            por_id[fuente.asset_id] = fuente
+            # Dos fuentes sobre el mismo archivo harían ambigua su clase, y una
+            # clase ambigua en la puerta del render es una puerta abierta.
+            if fuente.local_path is not None:
+                if fuente.local_path in por_ruta:
+                    raise ValueError(
+                        f"{fuente.local_path!r} lo reclaman dos fuentes "
+                        f"({por_ruta[fuente.local_path]!r} y {fuente.asset_id!r}): "
+                        f"su clasificación sería ambigua"
+                    )
+                por_ruta[fuente.local_path] = fuente.asset_id
+
+        decidido: dict[str, LicenseDecision] = {}
+        for decision in self.decisions:
+            if decision.asset_id in decidido:
+                raise ValueError(
+                    f"hay dos decisiones para {decision.asset_id!r}; una decisión "
+                    f"de procedencia no puede contradecirse consigo misma"
+                )
+            fuente = por_id.get(decision.asset_id)
+            if fuente is None:
+                raise ValueError(
+                    f"la decisión sobre {decision.asset_id!r} no corresponde a "
+                    f"ninguna fuente registrada"
+                )
+            # La evidencia que invoca la decisión tiene que existir en la fuente.
+            for evidence_id in decision.evidence_ids:
+                if fuente.evidencia(evidence_id) is None:
+                    raise ValueError(
+                        f"la decisión sobre {decision.asset_id!r} invoca la "
+                        f"evidencia {evidence_id!r}, que la fuente no registra"
+                    )
+            if (
+                decision.decision is ClaseFuente.render_permitido
+                and fuente.attribution_required
+                and not (fuente.attribution_text or "").strip()
+            ):
+                raise ValueError(
+                    f"{decision.asset_id!r} exige atribución y no hay texto con el "
+                    f"que atribuir; no puede autorizarse el render"
+                )
+            decidido[decision.asset_id] = decision
 
         for ruta in self.render_assets:
-            declarado = por_ruta.get(ruta)
-            if declarado is None:
+            fuente = self._por_ruta(ruta)
+            if fuente is None:
                 raise ValueError(
                     f"el recurso {ruta!r} se usaría en el render sin procedencia "
                     f"declarada"
                 )
-            if declarado.source_class is not ClaseFuente.render_permitido:
+            decision = decidido.get(fuente.asset_id)
+            if decision is None:
+                raise ValueError(
+                    f"el recurso {ruta!r} se usaría en el render sin ninguna "
+                    f"decisión de licencia"
+                )
+            if decision.decision is not ClaseFuente.render_permitido:
                 raise ValueError(
                     f"el recurso {ruta!r} está clasificado "
-                    f"{declarado.source_class.value!r} y no puede usarse en el "
-                    f"render"
+                    f"{decision.decision.value!r} y no puede usarse en el render"
                 )
         return self
 
-    def clase(self, ruta: str) -> ClaseFuente | None:
-        """Clase declarada de un recurso, o None si no está en el ledger."""
-        for asset in self.assets:
-            if asset.asset_path == ruta:
-                return asset.source_class
+    # --- consultas ---------------------------------------------------------
+
+    def _por_ruta(self, ruta: str) -> SourceAsset | None:
+        for fuente in self.sources:
+            if fuente.local_path == ruta:
+                return fuente
         return None
 
+    def fuente(self, asset_id: str) -> SourceAsset | None:
+        for fuente in self.sources:
+            if fuente.asset_id == asset_id:
+                return fuente
+        return None
+
+    def decision(self, asset_id: str) -> LicenseDecision | None:
+        for decision in self.decisions:
+            if decision.asset_id == asset_id:
+                return decision
+        return None
+
+    def fuente_de(self, ruta: str) -> SourceAsset | None:
+        """La fuente cuyo archivo es esa ruta, o None si ninguna lo es."""
+        return self._por_ruta(ruta)
+
+    def clase(self, ruta: str) -> ClaseFuente | None:
+        """Clase decidida para un recurso, o None si no hay fuente o decisión.
+
+        Sin decisión no hay clase. Una fuente registrada pero sin decidir **no**
+        es utilizable: es exactamente el caso que ``needs_review`` describe, y
+        tratarla como permitida sería inventar la decisión que falta.
+        """
+        fuente = self._por_ruta(ruta)
+        if fuente is None:
+            return None
+        decision = self.decision(fuente.asset_id)
+        return decision.decision if decision else None
+
     def permite_render(self, ruta: str) -> bool:
-        """True solo si el recurso está declarado y es utilizable en el render."""
+        """True solo si el recurso tiene decisión y esa decisión lo permite."""
         return self.clase(ruta) is ClaseFuente.render_permitido
+
+    def sin_decidir(self) -> list[str]:
+        """Fuentes registradas para las que nadie tomó una decisión."""
+        decididas = {d.asset_id for d in self.decisions}
+        return [f.asset_id for f in self.sources if f.asset_id not in decididas]
+
+    def por_clase(self, clase: ClaseFuente) -> list[SourceAsset]:
+        return [
+            fuente
+            for decision in self.decisions
+            if decision.decision is clase and (fuente := self.fuente(decision.asset_id))
+        ]
+
+    def rutas_por_clase(self, clase: ClaseFuente) -> list[str]:
+        """Archivos de los recursos clasificados así. Omite los que no tienen."""
+        return [
+            fuente.local_path
+            for fuente in self.por_clase(clase)
+            if fuente.local_path is not None
+        ]
+
+    def versiones_de_politica(self) -> set[str]:
+        """Bajo qué políticas se decidió lo que hay aquí.
+
+        Más de una no es un error del pasado: un ledger puede arrastrar
+        decisiones tomadas antes de que la política cambiara. Lo que sí importa
+        es poder detectarlo, y de eso se encarga la etapa.
+        """
+        return {d.policy_version for d in self.decisions}
 
 
 class TipoTransformacion(str, Enum):

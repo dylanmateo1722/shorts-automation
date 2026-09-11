@@ -160,7 +160,9 @@ jobs:
           grep -q "editorial_legal=NOT_ASSESSED" /tmp/g4.log
 
           # El recurso de referencia está registrado y fuera del render.
-          grep -q "stage=provenance event=reference_only asset=reference/fuente.txt" /tmp/g4.log
+          grep -q "stage=provenance event=reference_only asset=reference:0 path=reference/fuente.txt" /tmp/g4.log
+          grep -q "event=recorded .*policy_version=provenance_policy_v1" /tmp/g4.log
+          grep -q "class_render_allowed=4 class_reference_only=1" /tmp/g4.log
           .venv/bin/python - "$RUN_ID" <<'PY'
           import json, sys
           from pathlib import Path
@@ -171,7 +173,13 @@ jobs:
           conjunto = json.loads((raiz / "transformation_set.json").read_text(encoding="utf-8"))
 
           referencia = "reference/fuente.txt"
-          clases = {a["asset_path"]: a["source_class"] for a in ledger["assets"]}
+          por_id = {f["asset_id"]: f for f in ledger["sources"]}
+          decisiones = {d["asset_id"]: d for d in ledger["decisions"]}
+          clases = {
+              f["local_path"]: decisiones[f["asset_id"]]["decision"]
+              for f in ledger["sources"]
+              if f.get("local_path") and f["asset_id"] in decisiones
+          }
           assert clases[referencia] == "reference_only", clases
           assert referencia not in ledger["render_assets"], ledger["render_assets"]
           assert all(e["asset_ref"] != referencia for e in conjunto["elements"])
@@ -199,6 +207,181 @@ jobs:
           for ETAPA in overlay provenance transformation technical_qa; do
             grep -q "stage=$ETAPA event=skip" /tmp/g4-reanudacion.log
           done
+
+      - name: Procedencia, evidencia y decisiones de licencia
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          # Fuentes externas declaradas a mano. No hay descubrimiento ni descarga:
+          # alguien declara la fuente y su evidencia, y la política decide.
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          mkdir -p "runs/$RUN_ID/reference" "runs/$RUN_ID/external"
+          echo "consultado como referencia" > "runs/$RUN_ID/reference/fuente.txt"
+          echo "clip de dominio publico" > "runs/$RUN_ID/external/clip.txt"
+
+          cat > /tmp/fuentes.json <<'JSON'
+          {
+            "note": "declaradas a mano para ejercitar la politica; sin credenciales",
+            "sources": [
+              {
+                "basis": "public_domain",
+                "asset": {
+                  "asset_id": "externa:dominio-publico",
+                  "media_kind": "video",
+                  "origin": "archivo de dominio publico",
+                  "local_path": "external/clip.txt",
+                  "evidence": [{
+                    "evidence_id": "ev-pd",
+                    "kind": "public_domain_record",
+                    "reference": "registro-publico#1931",
+                    "description": "registro que sustenta el dominio publico"
+                  }]
+                }
+              },
+              {
+                "basis": "cc_by",
+                "asset": {
+                  "asset_id": "externa:cc-sin-licencia-concreta",
+                  "media_kind": "image",
+                  "origin": "etiquetado Creative Commons, sin licencia concreta",
+                  "evidence": [{
+                    "evidence_id": "ev-cc",
+                    "kind": "cc_license_record",
+                    "reference": "https://example.org/licencia",
+                    "description": "pagina generica de Creative Commons"
+                  }]
+                }
+              },
+              {
+                "basis": "permission",
+                "asset": {
+                  "asset_id": "externa:permiso-sin-documento",
+                  "media_kind": "image",
+                  "origin": "cedida por correo segun el solicitante"
+                }
+              },
+              {
+                "basis": "fair_use_claim",
+                "asset": {
+                  "asset_id": "externa:uso-legitimo-alegado",
+                  "media_kind": "video",
+                  "origin": "fragmento de un Short ajeno",
+                  "source_url": "https://www.youtube.com/shorts/ejemplo"
+                }
+              },
+              {
+                "basis": "licensed",
+                "asset": {
+                  "asset_id": "externa:licencia-no-comercial",
+                  "media_kind": "audio",
+                  "origin": "biblioteca con licencia no comercial",
+                  "license_id": "EJEMPLO-NC-1",
+                  "commercial_use_allowed": false,
+                  "evidence": [{
+                    "evidence_id": "ev-nc",
+                    "kind": "license_page",
+                    "reference": "https://example.org/nc",
+                    "description": "licencia que excluye el uso previsto"
+                  }]
+                }
+              }
+            ]
+          }
+          JSON
+
+          .venv/bin/python -m app run \
+            --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --sources /tmp/fuentes.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g6.log
+
+          # Cada clase se alcanza de verdad, y ninguna por accidente.
+          grep -q "class_render_allowed=5 class_reference_only=1 class_needs_review=3 class_blocked=1" /tmp/g6.log
+          grep -q "event=needs_review asset=externa:uso-legitimo-alegado basis=fair_use_claim" /tmp/g6.log
+          grep -q "event=blocked asset=externa:licencia-no-comercial basis=licensed" /tmp/g6.log
+
+          .venv/bin/python - "$RUN_ID" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          raiz = Path("runs") / sys.argv[1]
+          led = json.loads((raiz / "provenance_ledger.json").read_text(encoding="utf-8"))
+
+          fuentes = {f["asset_id"]: f for f in led["sources"]}
+          decisiones = {d["asset_id"]: d for d in led["decisions"]}
+
+          # La cadena SourceAsset -> Evidence -> LicenseDecision está completa.
+          assert set(fuentes) == set(decisiones), (set(fuentes) ^ set(decisiones))
+          for aid, d in decisiones.items():
+              assert d["policy_version"] == "provenance_policy_v1", d
+              assert d["reason"].strip(), aid
+              registradas = {e["evidence_id"] for e in fuentes[aid]["evidence"]}
+              assert set(d["evidence_ids"]) <= registradas, (aid, d["evidence_ids"])
+              if d["decision"] == "render_allowed":
+                  assert d["evidence_ids"], f"{aid} autorizado sin evidencia"
+                  assert d["basis"] not in ("unknown", "fair_use_claim"), d
+
+          esperado = {
+              "externa:dominio-publico": "render_allowed",
+              "externa:cc-sin-licencia-concreta": "needs_review",
+              "externa:permiso-sin-documento": "needs_review",
+              "externa:uso-legitimo-alegado": "needs_review",
+              "externa:licencia-no-comercial": "blocked",
+              "reference:0": "reference_only",
+          }
+          real = {k: decisiones[k]["decision"] for k in esperado}
+          assert real == esperado, real
+
+          # Lo que produce el pipeline va con huella: ancla la decisión al contenido.
+          for ruta in led["render_assets"]:
+              fuente = next(f for f in led["sources"] if f.get("local_path") == ruta)
+              assert fuente["sha256"], ruta
+              assert decisiones[fuente["asset_id"]]["decision"] == "render_allowed"
+
+          # Nada ajeno entra al render por estar autorizado: sólo lo que se usa.
+          assert "external/clip.txt" not in led["render_assets"]
+          assert "reference/fuente.txt" not in led["render_assets"]
+
+          # El ledger referencia, no duplica.
+          assert all("local_path" not in d for d in led["decisions"])
+
+          # Y no guarda secretos.
+          crudo = (raiz / "provenance_ledger.json").read_text(encoding="utf-8").lower()
+          for prohibido in ("api_key", "apikey", "token", "bearer", "cookie", "secret", "password"):
+              assert prohibido not in crudo, prohibido
+
+          print(
+              f"procedencia: {len(fuentes)} fuentes, {len(decisiones)} decisiones, "
+              f"{len(led['render_assets'])} utilizables, política "
+              f"{decisiones['reference:0']['policy_version']}"
+          )
+          print("RENDER_ALLOWED != LEGAL_CERTIFIED: la decisión es técnica, no jurídica")
+          PY
+
+          # Idempotencia: con las mismas entradas no se rehace ni se duplica nada.
+          .venv/bin/python -m app run --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --sources /tmp/fuentes.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g6-reanudacion.log
+          grep -q "stage=provenance event=skip" /tmp/g6-reanudacion.log
+
+          # Cambiar el contenido de un recurso autorizado invalida su decisión.
+          echo "contenido sustituido" >> "runs/$RUN_ID/overlay/overlay.ass"
+          .venv/bin/python -m app run --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --sources /tmp/fuentes.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g6-hash.log
+          grep -q "stage=provenance event=artifact_invalid" /tmp/g6-hash.log
 
       - name: Publicar artefactos de voz, transformación y QA
         if: always()
@@ -335,7 +518,13 @@ jobs:
 
           # El recurso de referencia no llegó al vídeo por ninguna vía.
           referencia = "reference/fuente.txt"
-          clases = {a["asset_path"]: a["source_class"] for a in ledger["assets"]}
+          por_id = {f["asset_id"]: f for f in ledger["sources"]}
+          decisiones = {d["asset_id"]: d for d in ledger["decisions"]}
+          clases = {
+              f["local_path"]: decisiones[f["asset_id"]]["decision"]
+              for f in ledger["sources"]
+              if f.get("local_path") and f["asset_id"] in decisiones
+          }
           assert clases[referencia] == "reference_only", clases
           assert referencia not in ledger["render_assets"], ledger["render_assets"]
           assert referencia not in [
@@ -357,7 +546,7 @@ jobs:
       # No basta con que el job falle: hay que ver que el motor no llegó a
       # ejecutarse. Si arrancara, el vídeo ya estaría hecho con material que
       # nadie autorizó, y eso no se deshace.
-      - name: Un recurso REFERENCE_ONLY bloquea el render antes de invocar el motor
+      - name: Ninguna clase que no autorice llega al motor
         env:
           LLM_PROVIDER: fake
           LLM_MODEL: fake-1
@@ -365,10 +554,14 @@ jobs:
           TTS_PROVIDER: fake
         run: |
           .venv/bin/python - <<'PY'
-          import uuid
+          import json, shutil, uuid
+          from pathlib import Path
+
           from app.config.settings import Settings
-          from app.contracts.models import ClaseFuente, ProvenanceLedger, RenderResult
-          from app.core.errors import ProcedenciaInvalida
+          from app.contracts.models import (
+              BaseLicencia, ClaseFuente, ProvenanceLedger, RenderResult,
+          )
+          from app.core.errors import ArtefactoCorrupto, ProcedenciaInvalida
           from app.core.manifest import Manifest
           from app.core.stage_runner import StageRunner
           from app.core.workspace import Workspace
@@ -376,42 +569,128 @@ jobs:
           from app.pipeline.linguistic import construir_pipeline_linguistico
 
           s = Settings.desde_entorno()
-          rid = uuid.uuid4()
-          ws = Workspace(s.raiz_runs, rid); ws.crear()
-          man, _ = Manifest.cargar_o_crear(ws.dir, rid, config=s.publico(), versions={})
-          runner = StageRunner(ws, man, s, {
-              "transcript_path": "tests/fixtures/transcripts/estudio_atencion.json",
-              "target_duration_seconds": 30,
-          })
-          etapas = (construir_pipeline_linguistico() + voice.construir_pipeline_voz()
-                    + [render.ETAPA_MATERIAL] + qa.construir_pipeline_transformacion())
-          for e in etapas:
-              runner.ejecutar(e)
 
-          assert not (ws.dir / "render" / "mpt.log").exists(), "el motor ya había corrido"
+          def corrida_hasta_el_job():
+              """Una corrida con todo listo y el render por delante, sin tocar el motor."""
+              rid = uuid.uuid4()
+              ws = Workspace(s.raiz_runs, rid); ws.crear()
+              man, _ = Manifest.cargar_o_crear(ws.dir, rid, config=s.publico(), versions={})
+              runner = StageRunner(ws, man, s, {
+                  "transcript_path": "tests/fixtures/transcripts/estudio_atencion.json",
+                  "target_duration_seconds": 30,
+              })
+              etapas = (construir_pipeline_linguistico() + voice.construir_pipeline_voz()
+                        + [render.ETAPA_MATERIAL] + qa.construir_pipeline_transformacion())
+              for e in etapas:
+                  runner.ejecutar(e)
+              assert not (ws.dir / "render" / "mpt.log").exists(), "el motor ya había corrido"
+              return runner, ws
 
+          def guardar(ws, runner, ledger):
+              ws.escribir_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ledger)
+              runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+
+          def sin_motor(ws, caso):
+              assert not (ws.dir / "render").exists(), f"{caso}: el motor se ejecutó"
+              assert not ws.existe("render_job"), caso
+              assert not ws.existe("render_result"), caso
+
+          def degradar(ledger, material, clase):
+              objetivo = ledger.fuente_de(material).asset_id
+              return ledger.model_copy(update={
+                  "decisions": [
+                      d.model_copy(update={
+                          "decision": clase,
+                          "basis": BaseLicencia.desconocida,
+                          "evidence_ids": [],
+                          "reason": f"degradado a {clase.value} para comprobar el bloqueo",
+                      })
+                      if d.asset_id == objetivo else d for d in ledger.decisions
+                  ],
+                  "render_assets": [r for r in ledger.render_assets if r != material],
+              })
+
+          # --- Cada clase que no autoriza, una por una --------------------------
+          for clase in (ClaseFuente.solo_referencia, ClaseFuente.revision_pendiente,
+                        ClaseFuente.bloqueado):
+              runner, ws = corrida_hasta_el_job()
+              material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+              led = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+              guardar(ws, runner, degradar(led, material, clase))
+              try:
+                  runner.ejecutar(render.ETAPA_JOB)
+              except ProcedenciaInvalida as exc:
+                  print(f"BLOQUEADO {clase.value}: {exc.mensaje}")
+              else:
+                  raise SystemExit(f"el job se construyó con un recurso {clase.value}")
+              sin_motor(ws, clase.value)
+
+          # --- Un recurso que nadie declaró ------------------------------------
+          runner, ws = corrida_hasta_el_job()
           material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
-          ledger = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
-          ws.escribir_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ledger.model_copy(update={
-              "assets": [
-                  a.model_copy(update={"source_class": ClaseFuente.solo_referencia})
-                  if a.asset_path == material else a for a in ledger.assets
-              ],
-              "render_assets": [r for r in ledger.render_assets if r != material],
+          led = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+          objetivo = led.fuente_de(material).asset_id
+          guardar(ws, runner, led.model_copy(update={
+              "sources": [f for f in led.sources if f.asset_id != objetivo],
+              "decisions": [d for d in led.decisions if d.asset_id != objetivo],
+              "render_assets": [r for r in led.render_assets if r != material],
           }))
-          runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
-
           try:
               runner.ejecutar(render.ETAPA_JOB)
           except ProcedenciaInvalida as exc:
-              print(f"BLOQUEADO en render_job: {exc.mensaje}")
+              print(f"BLOQUEADO sin declarar: {exc.mensaje}")
           else:
-              raise SystemExit("el job se construyó pese al recurso de referencia")
+              raise SystemExit("el job se construyó con un recurso sin declarar")
+          sin_motor(ws, "sin declarar")
 
-          assert not (ws.dir / "render").exists(), "el motor se ejecutó pese al bloqueo"
-          assert not ws.existe("render_job")
-          assert not ws.existe("render_result")
-          print("MPT no se invocó: no existe runs/<run>/render/")
+          # --- Un recurso registrado pero sin decidir --------------------------
+          runner, ws = corrida_hasta_el_job()
+          material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+          led = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+          objetivo = led.fuente_de(material).asset_id
+          guardar(ws, runner, led.model_copy(update={
+              "decisions": [d for d in led.decisions if d.asset_id != objetivo],
+              "render_assets": [r for r in led.render_assets if r != material],
+          }))
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ProcedenciaInvalida as exc:
+              print(f"BLOQUEADO sin decisión: {exc.mensaje}")
+          else:
+              raise SystemExit("el job se construyó sin decisión de licencia")
+          sin_motor(ws, "sin decisión")
+
+          # --- Una decisión que se contradice a sí misma -----------------------
+          # Se edita el JSON a mano porque el contrato no permite construirla: un
+          # render_allowed sobre base unknown no existe ni en memoria.
+          runner, ws = corrida_hasta_el_job()
+          ruta = ws.ruta_artefacto(transformation.ARTEFACTO_PROCEDENCIA)
+          datos = json.loads(ruta.read_text(encoding="utf-8"))
+          datos["decisions"][0]["basis"] = "unknown"
+          ruta.write_text(json.dumps(datos), encoding="utf-8")
+          runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ArtefactoCorrupto as exc:
+              print(f"BLOQUEADO decisión inconsistente: {exc}")
+          else:
+              raise SystemExit("el job se construyó con una decisión inconsistente")
+          sin_motor(ws, "decisión inconsistente")
+
+          # --- Un archivo que cambió tras autorizarse -------------------------
+          runner, ws = corrida_hasta_el_job()
+          material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+          archivo = ws.ruta(material)
+          archivo.write_bytes(archivo.read_bytes() + b"\x00sustituido")
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ProcedenciaInvalida as exc:
+              print(f"BLOQUEADO hash distinto: {exc.mensaje}")
+          else:
+              raise SystemExit("el job se construyó con un archivo sustituido")
+          sin_motor(ws, "hash distinto")
+
+          print("MPT no se invocó en ninguno de los seis casos: no existe runs/<run>/render/")
           PY
 
       - name: Reanudar no vuelve a renderizar

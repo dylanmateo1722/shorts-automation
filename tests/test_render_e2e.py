@@ -39,6 +39,7 @@ from app.core.manifest import EstadoEtapa, Manifest
 from app.core.stage_runner import StageRunner
 from app.pipeline import qa_video, render, transformation, voice
 from app.pipeline.stages import ARTEFACTO_JOB, ARTEFACTO_RESULTADO
+from tests.conftest import reclasificar, sin_fuente
 
 RUTA_LOG_MOTOR = "render/mpt.log"
 
@@ -70,25 +71,26 @@ def _todo(runner: StageRunner):
     return resultados
 
 
-def _degradar_a_referencia(runner: StageRunner, ruta: str) -> None:
-    """Reclasifica un recurso como material de referencia en el ledger."""
-    ws = runner.workspace
-    ledger = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
-    ws.escribir_artefacto(
-        transformation.ARTEFACTO_PROCEDENCIA,
-        ledger.model_copy(
-            update={
-                "assets": [
-                    a.model_copy(update={"source_class": ClaseFuente.solo_referencia})
-                    if a.asset_path == ruta
-                    else a
-                    for a in ledger.assets
-                ],
-                "render_assets": [r for r in ledger.render_assets if r != ruta],
-            }
-        ),
-    )
+def _reescribir_ledger(runner: StageRunner, nuevo) -> None:
+    """Persiste un ledger manipulado y obliga a releerlo desde el disco."""
+    runner.workspace.escribir_artefacto(transformation.ARTEFACTO_PROCEDENCIA, nuevo)
     runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+
+
+def _ledger_de(runner: StageRunner):
+    return runner.workspace.leer_artefacto(
+        transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger
+    )
+
+
+def _degradar(runner: StageRunner, ruta: str, clase, *, basis=None) -> None:
+    """Cambia a mano la clase de un recurso, como haría alguien editando el JSON.
+
+    El pipeline no produce por sí mismo un recurso bloqueado —todo lo que genera
+    es propio y sale autorizado—, así que los casos que importan (que el motor no
+    se ejecute) hay que provocarlos.
+    """
+    _reescribir_ledger(runner, reclasificar(_ledger_de(runner), ruta, clase, basis=basis))
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +168,7 @@ def test_render_job_rechaza_un_recurso_de_referencia(runner):
     material = runner.workspace.leer_artefacto(
         render.ARTEFACTO_MATERIAL, RenderResult
     ).output_path
-    _degradar_a_referencia(runner, material)
+    _degradar(runner, material, ClaseFuente.solo_referencia)
 
     with pytest.raises(ProcedenciaInvalida, match="reference_only"):
         runner.ejecutar(render.ETAPA_JOB, forzar=True)
@@ -175,18 +177,8 @@ def test_render_job_rechaza_un_recurso_de_referencia(runner):
 def test_render_job_rechaza_un_recurso_sin_declarar(runner):
     """Sin procedencia declarada no se entra al render, aunque el archivo esté."""
     ws = runner.workspace
-    ledger = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
     material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
-    ws.escribir_artefacto(
-        transformation.ARTEFACTO_PROCEDENCIA,
-        ledger.model_copy(
-            update={
-                "assets": [a for a in ledger.assets if a.asset_path != material],
-                "render_assets": [r for r in ledger.render_assets if r != material],
-            }
-        ),
-    )
-    runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+    _reescribir_ledger(runner, sin_fuente(_ledger_de(runner), material))
 
     with pytest.raises(ProcedenciaInvalida, match="sin procedencia declarada"):
         runner.ejecutar(render.ETAPA_JOB, forzar=True)
@@ -200,7 +192,7 @@ def test_un_recurso_de_referencia_impide_el_render_sin_llegar_al_motor(runner):
     """
     ws = runner.workspace
     material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
-    _degradar_a_referencia(runner, material)
+    _degradar(runner, material, ClaseFuente.solo_referencia)
 
     assert not ws.ruta(RUTA_LOG_MOTOR).exists(), "el motor ya había corrido"
 
@@ -606,7 +598,7 @@ def test_perder_la_autorizacion_invalida_un_job_ya_hecho(runner):
     material = runner.workspace.leer_artefacto(
         render.ARTEFACTO_MATERIAL, RenderResult
     ).output_path
-    _degradar_a_referencia(runner, material)
+    _degradar(runner, material, ClaseFuente.solo_referencia)
 
     with pytest.raises(ProcedenciaInvalida):
         runner.ejecutar(render.ETAPA_JOB)

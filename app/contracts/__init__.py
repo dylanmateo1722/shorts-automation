@@ -1,6 +1,7 @@
 """Contratos públicos entre etapas."""
 
 from app.contracts.models import (  # noqa: F401
+    BASES_NUNCA_RENDERIZABLES,
     CARACTERES_OBJETIVO_LINEA,
     MAX_LINEAS_SUBTITULO,
     NOTA_EDITORIAL,
@@ -12,7 +13,6 @@ from app.contracts.models import (  # noqa: F401
     Artefacto,
     ArtefactoTransformacion,
     ArtefactoVoz,
-    AssetProvenance,
     BaseLicencia,
     Candidate,
     ClaseFuente,
@@ -22,6 +22,7 @@ from app.contracts.models import (  # noqa: F401
     EstadoRender,
     EstadoValidacion,
     EvaluacionEditorialLegal,
+    Evidence,
     LicenseDecision,
     ModoAjuste,
     NivelQA,
@@ -43,6 +44,8 @@ from app.contracts.models import (  # noqa: F401
     SubtitleAsset,
     SubtitleCue,
     TextoNoVacio,
+    TipoEvidencia,
+    TipoMedio,
     TipoSeccion,
     TipoTransformacion,
     TransformationElement,

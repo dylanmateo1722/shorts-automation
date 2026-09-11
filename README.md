@@ -17,13 +17,21 @@ configuración ni historial con ese repositorio.
 | Gate 2 | Traducción y adaptación editorial al español | Aprobado |
 | Gate 3 | TTS, WordBoundaries y subtítulos (SRT + ASS) | Aprobado |
 | Gate 4 | Procedencia, transformación editorial y QA técnica | Aprobado |
-| **Gate 5** | **MVP de extremo a extremo: composición y MP4 final** | **En verificación** |
-| Gate 6+ | Discovery, análisis de competencia, publicación | No iniciado |
+| Gate 5 | MVP de extremo a extremo: composición y MP4 final | Aprobado |
+| **Gate 6** | **Fuentes, evidencia y decisiones de licencia** | **En verificación** |
+| Gate 7+ | Discovery, análisis de competencia, publicación | No iniciado |
 
 Con Gate 5 el pipeline produce un **Short vertical real**: 1080×1920, H.264,
 AAC, con narración, subtítulos y rótulo propios, validado sobre el archivo.
-**No hay** Discovery, ni scraping, ni análisis de competencia, ni integración
-con YouTube, ni publicación, ni planificación.
+
+Gate 6 añade la capa de procedencia: cada recurso se registra como `SourceAsset`
+con su evidencia, recibe una `LicenseDecision` explícita bajo una política
+versionada, y **nada llega al motor sin una decisión que lo autorice**.
+`render_allowed` significa que la política técnica lo permite — **no** que algo
+esté certificado legalmente.
+
+**No hay** Discovery, ni scraping, ni análisis de competencia, ni integración con
+YouTube, ni publicación, ni planificación.
 
 ## Arquitectura actual
 
@@ -44,7 +52,7 @@ poc/              Proof of Concept de Gate 0.5, conservado como evidencia
 vendor/           MoneyPrinterTurbo como submódulo fijado por commit
 ```
 
-Cuatro reglas que el código impone, no solo documenta:
+Reglas que el código impone, no solo documenta:
 
 - **El motor solo se alcanza por `app/adapters/mpt.py`.** Ningún otro módulo
   conoce su ruta, su intérprete, sus flags ni el formato de su salida.
@@ -55,10 +63,14 @@ Cuatro reglas que el código impone, no solo documenta:
   de lenguaje definitivo sigue pendiente de una evaluación comparativa.
 - **La duración del audio se mide sobre el archivo.** Nunca se deriva de la
   estimación del guion ni del último tiempo que reporte el TTS.
-- **Un recurso de referencia no puede acabar en el render.** No es una
-  convención de nombres: el contrato de procedencia se niega a validar si uno
-  aparece entre los utilizables, y la puerta se aplica **antes** de invocar el
-  motor.
+- **Nada entra al render sin una decisión que lo autorice.** No es una
+  convención de nombres: el contrato de procedencia se niega a validar si un
+  recurso sin declarar, sin decisión o con una decisión que no sea
+  `render_allowed` aparece entre los utilizables, y la puerta —que además
+  comprueba la huella del archivo— se aplica **antes** de invocar el motor.
+- **La decisión de procedencia es técnica, no jurídica.** `render_allowed` dice
+  que la política de este sistema lo permite; el juicio editorial y legal vive
+  aparte y su estado por defecto es `NOT_ASSESSED`.
 - **Las propiedades del MP4 se leen del archivo.** Que el motor las configurara
   no es evidencia de que estén.
 
@@ -341,41 +353,205 @@ SubtitleAsset ─→ overlay ─→ procedencia ─→ transformación ─→ QA
               OverlaySpec  ProvenanceLedger  TransformationSet  QAResult
 ```
 
-### REFERENCE_ONLY y RENDER_ALLOWED
+### RENDER_ALLOWED no es LEGAL_CERTIFIED
 
-Todo recurso de una corrida se declara en una de dos clases, y la diferencia es
-la frontera que más importa en este proyecto:
+Esto es lo primero que hay que entender de toda la capa, y conviene leerlo antes
+que nada de lo que sigue.
 
-| | `reference_only` | `render_allowed` |
+Que un recurso esté clasificado `render_allowed` significa **exactamente** esto:
+
+> la procedencia registrada y la evidencia disponible satisfacen la política
+> técnica de este sistema para permitir su utilización.
+
+Y **no** significa ninguna de estas cosas:
+
+- que exista garantía legal de nada;
+- que no haya reclamaciones de copyright;
+- que no vaya a activarse Content ID;
+- que la pieza sea monetizable;
+- que esto constituya asesoramiento jurídico.
+
+La decisión técnica de procedencia y el juicio editorial/legal están separados a
+propósito y viven en sitios distintos: la primera en `LicenseDecision`, el
+segundo en `QAResult.editorial_legal_assessment`, cuyo estado por defecto es
+`NOT_ASSESSED` y solo una persona puede cambiar. El sistema no los mezcla porque
+no son lo mismo.
+
+### La cadena: fuente, evidencia, decisión
+
+```
+SourceAsset ──→ Evidence ──→ LicenseDecision ──→ render_assets ──→ MPT
+ qué hay y       dónde         qué se puede        lo que esta       el motor
+ de dónde        mirarlo       hacer con ello      corrida usa
+ viene           para
+                 comprobarlo
+```
+
+Las tres cosas se persisten juntas en `provenance_ledger.json`, que es el único
+ledger del sistema: no hay un segundo registro paralelo. Las decisiones
+**referencian** las fuentes por `asset_id` en vez de copiarlas.
+
+`SourceAsset` registra identidad estable (`asset_id`), tipo de medio, origen, URL
+cuando la hay, ruta local cuando la hay, huella SHA-256, fecha de obtención, su
+evidencia y sus datos de atribución. La ruta es opcional a propósito: una fuente
+puede conocerse sin tenerla descargada, y ese es justamente el caso de un Short
+ajeno del que solo se sabe la dirección.
+
+`Evidence` no es un gestor documental, es una referencia auditable: tipo
+(`license_page`, `permission_document`, `ownership_record`,
+`public_domain_record`, `cc_license_record`, `other`), referencia, descripción,
+fecha y quién la emitió. **Si el respaldo vive detrás de una credencial, aquí va
+el puntero, nunca la credencial.**
+
+`LicenseDecision` registra la fuente, la decisión, la base, qué evidencia la
+respalda, el motivo, cuándo se decidió, quién decidió y bajo qué versión de
+política.
+
+### Las cuatro clases
+
+| Clase | Qué significa | ¿Entra al render? |
 |---|---|---|
-| Para qué sirve | referencia temática, investigación, análisis, inspiración editorial | material que puede aparecer en la pieza |
-| Puede existir en la corrida | sí | sí |
-| Puede informar el guion | sí | sí |
-| Puede usarse en el render | **no** | sí |
-| Base de procedencia | ninguna declarada | propia, stock, Creative Commons, dominio público o permiso documentado |
+| `render_allowed` | hay base aceptada y la evidencia que la política exige | **sí** |
+| `reference_only` | se consultó para investigar, analizar o documentarse | no |
+| `needs_review` | falta información para decidir | no |
+| `blocked` | se decidió que no | no |
 
-**La restricción es estructural, no una convención.** `ProvenanceLedger` lleva
-dos listas: los recursos declarados y los que el render puede usar, y el
-contrato **se niega a validar** si la segunda contiene uno clasificado
-`reference_only` o uno que no esté declarado. Un archivo llamado
-`narration_propia_original.mp3` sigue bloqueado si su procedencia dice que es
-de referencia; hay un test que lo comprueba exactamente así. No hay promoción
-automática de una clase a la otra: hay que cambiar la clase declarada.
+`reference_only` puede informar el análisis, el tema, el `Transcript`, la
+`Translation` y el `AdaptedScript`. Lo que no puede ser es fuente de vídeo, de
+imagen o de audio, asset de render, entrada de MPT, entrada de FFmpeg, salida
+final ni dependencia directa o indirecta de un `RenderJob`.
 
-Declarar un recurso de referencia en una corrida:
+**La prohibición es estructural, no una convención de nombres.**
+`ProvenanceLedger` **se niega a validar** si `render_assets` contiene la ruta de
+un recurso sin fuente declarada, sin decisión, o con una decisión que no sea
+`render_allowed`. Un archivo llamado `narration_propia_original.mp3` sigue
+bloqueado si su procedencia dice que es de referencia; hay un test que lo
+comprueba exactamente así.
+
+No hay promoción automática. Pasar de `reference_only` a `render_allowed` exige
+una decisión nueva, con base y evidencia:
+
+```
+source ─→ provenance evidence ─→ LicenseDecision ─→ RENDER_ALLOWED ─→ RenderJob
+```
+
+Y no existe ninguna regla «URL de YouTube → `render_allowed`». Conocer la
+dirección de un vídeo ajeno no autoriza a renderizarlo; hay un test que recorre
+las siete bases y comprueba que esa fuente no se autoriza con ninguna.
+
+`reference_only` se alcanza **declarándolo**, no evaluándolo: decir «esto lo
+consulté» es una afirmación sobre el uso, no sobre la licencia, y por eso no
+necesita evidencia de licencia. Las otras tres clases salen de evaluar una base
+contra su evidencia. La distinción importa: marcar una referencia como
+`needs_review` insinuaría que alguien debería revisarla para desbloquearla.
+
+### Bases de procedencia y qué evidencia exige cada una
+
+El conjunto es cerrado: `own`, `licensed`, `cc_by`, `public_domain`,
+`permission`, `unknown`, `fair_use_claim`. Las dos últimas **nunca** habilitan el
+render por sí solas, y el contrato rechaza una decisión que lo intente.
+
+| Base | Evidencia que la respalda | Reglas añadidas |
+|---|---|---|
+| `own` | `ownership_record` | el artefacto que generó el recurso sirve como registro |
+| `licensed` | `license_page` o `cc_license_record` | si no consta que la licencia cubra el uso → `needs_review` |
+| `cc_by` | `cc_license_record` o `license_page` | exige la licencia concreta; «Creative Commons» a secas → `needs_review` |
+| `public_domain` | `public_domain_record` | la afirmación del usuario no es el registro |
+| `permission` | `permission_document` | `user_claimed_permission = true` no basta |
+| `unknown` | — | siempre `needs_review` |
+| `fair_use_claim` | — | siempre `needs_review`; **no hay evaluador de uso legítimo** |
+
+`other` no respalda ninguna base: una evidencia sin clasificar puede quedar
+registrada, pero si no se sabe qué es, no se sabe qué demuestra.
+
+Cuando la licencia registrada excluye el uso previsto
+(`commercial_use_allowed = false`), la clase es `blocked`. La política **nunca**
+deduce `blocked` de la ausencia de datos: lo que la ausencia produce es
+`needs_review`, que es lo que de verdad ocurre —falta información—.
+
+### Atribución
+
+El ledger registra `attribution_required`, `attribution_text` y
+`attribution_source`. **El texto no se genera automáticamente**: inventar un
+crédito legal sería peor que no tenerlo.
+
+Una atribución exigida sin texto es un estado representable a propósito —es el de
+quien sabe que hace falta crédito y aún no lo ha escrito—, la política lo
+clasifica `needs_review`, y el ledger se niega a validar su `render_allowed`
+aunque alguien edite el JSON a mano.
+
+### Versión de política
+
+Cada decisión registra `policy_version`, y la constante vive en **un solo sitio**,
+`app/config/provenance.py`:
+
+```python
+VERSION_POLITICA = "provenance_policy_v1"
+```
+
+Repetirla haría que dos copias divergieran y que un artefacto histórico mintiera
+sobre bajo qué reglas se decidió. Si el ledger de una corrida trae decisiones de
+otra versión, la etapa lo invalida y vuelve a decidir.
+
+### Integridad por hash
+
+Cada recurso con archivo local lleva su SHA-256, y eso ancla la decisión a un
+contenido concreto. El ledger permite detectar archivo cambiado, huella que no
+corresponde, ruta cambiada y asset sustituido; dos fuentes que reclamen el mismo
+archivo se rechazan, porque su clase sería ambigua.
+
+**Decisión tomada, y es deliberada: una huella que no coincide _rechaza_ el
+render; no degrada el recurso a `needs_review`.** La decisión se tomó sobre un
+contenido concreto; si el archivo cambió, la decisión ya no habla de lo que hay
+en disco, y dejarla como «pendiente de revisión» la haría parecer aplicable
+cuando no lo es.
+
+### Declarar recursos y fuentes
+
+Un recurso consultado solo como referencia:
 
 ```bash
 .venv/bin/python -m app run --pipeline transformation \
   --reference-asset reference/fuente.txt  ...
 ```
 
-Queda registrado con su clase, aparece como aviso en la QA y **no** entra en
-`render_assets`.
+Una fuente externa con su base y su evidencia, en un JSON:
 
-Gate 4 **no resuelve la cuestión legal de las licencias**. Registra de dónde
-viene cada recurso y a qué evidencia apuntar, y bloquea técnicamente lo que no
-está autorizado. Que `basis = stock` esté escrito no significa que alguien haya
-verificado esa licencia.
+```bash
+.venv/bin/python -m app run --pipeline e2e --sources fuentes.json  ...
+```
+
+```json
+{
+  "sources": [
+    {
+      "basis": "cc_by",
+      "asset": {
+        "asset_id": "externa:clip-cc",
+        "media_kind": "video",
+        "origin": "archivo del autor",
+        "source_url": "https://example.org/clip",
+        "local_path": "external/clip.mp4",
+        "license_id": "CC-BY-4.0",
+        "commercial_use_allowed": true,
+        "attribution_required": true,
+        "attribution_text": "Autora Ejemplo (CC BY 4.0)",
+        "evidence": [{
+          "evidence_id": "ev-cc-1",
+          "kind": "cc_license_record",
+          "reference": "https://creativecommons.org/licenses/by/4.0/",
+          "description": "licencia declarada para el clip"
+        }]
+      }
+    }
+  ]
+}
+```
+
+Declarar una fuente **no la autoriza**: la política decide su clase. Y una fuente
+autorizada tampoco entra sola al render —`render_assets` dice qué consume esta
+corrida, no qué sería elegible—. No se descarga nada: si la declaración trae
+`local_path`, el archivo tiene que existir ya en la corrida.
 
 ### Qué significa transformación editorial
 
@@ -509,20 +685,29 @@ posterior.
 
 ### La puerta de procedencia
 
-Antes de invocar el motor, `render_job` resuelve **cada** recurso que entraría
-al vídeo —audio, material, subtítulos, rótulo— contra el ledger de Gate 4:
+Antes de invocar el motor, `render_job` resuelve **cada** recurso que entraría al
+vídeo —audio, material, subtítulos, rótulo— contra el ledger:
 
-1. si no está declarado → se rechaza;
-2. si está clasificado `reference_only` → se rechaza;
-3. si el archivo no existe → se rechaza;
-4. y solo entonces se construye el job.
+1. si ninguna fuente lo declara → se rechaza;
+2. si su fuente no tiene `LicenseDecision` → se rechaza;
+3. si la decisión no es `render_allowed` → se rechaza;
+4. si el archivo no existe → se rechaza;
+5. si su huella no corresponde al archivo → se rechaza;
+6. y solo entonces se construye el job y el motor puede ejecutarse.
 
 También se exigen los cinco elementos de transformación: si falta uno, no se
 renderiza. Reutilizar un job anterior tampoco se salta la puerta — si un recurso
 pierde la autorización, el job deja de ser válido aunque el archivo siga ahí.
 
-Hay un test que lo demuestra donde importa: tras el bloqueo, el directorio
-`render/` **ni siquiera existe**. El motor no llegó a ejecutarse.
+Una decisión que se contradice a sí misma no llega ni a la puerta: el contrato no
+la valida, así que el ledger **no se puede leer** y la etapa falla antes. Es
+defensa en profundidad, y se comprueba con los dos mecanismos por separado.
+
+Hay tests y un paso de CI que lo demuestran donde importa: tras el bloqueo, el
+directorio `render/` **ni siquiera existe**. El material visual lo genera FFmpeg
+en local, así que la ausencia de `render/mpt.log` prueba que el motor no llegó a
+ejecutarse. Se verifican los seis casos: `reference_only`, `needs_review`,
+`blocked`, sin declarar, sin decisión y huella distinta.
 
 ### RenderJob y RenderResult
 
@@ -589,12 +774,28 @@ puede exigir. La inspección lo prefiere cuando existe en el sistema y cae a
 interpretar `ffmpeg -i` cuando no. `RenderResult.inspected_with` y el informe de
 QA dejan escrito cuál se usó en cada corrida en lugar de darlo por supuesto.
 
-### Qué queda pendiente después de Gate 5
+### Qué queda pendiente después de Gate 6
 
-Discovery, análisis de competencia, metadatos de publicación e integración con
-YouTube. Nada de eso existe todavía. En lo visual queda el estilo de producción:
-material propio de verdad en lugar del degradado, y resolver la redundancia
-entre rótulo y primer subtítulo.
+**Discovery.** No hay nada: ni búsqueda de Shorts, ni `search.list`, ni ranking
+viral, ni scraping, ni crawling, ni análisis de canales o de competencia, ni
+descargador de contenido ajeno. Las fuentes externas se declaran a mano en un
+JSON, que es lo que permite ejercitar la política sin inventarse un sistema de
+descubrimiento. Cuando Discovery exista, producirá `SourceAsset` que entrarán por
+esta misma cadena: la clase la seguirá decidiendo la política, nunca el hecho de
+haber encontrado algo.
+
+**YouTube.** No hay API, ni OAuth, ni tokens, ni subida, ni metadatos de
+publicación, ni programación. Tampoco hay —ni se planea aquí— clasificador de uso
+legítimo, clasificador de copyright, clasificador de monetización, detección de
+similitud ni nada que pretenda anticipar Content ID.
+
+**Qué sigue necesitando una persona.** La política decide si el pipeline *puede*
+utilizar técnicamente un recurso. No decide si *debe*: eso es el juicio editorial
+y legal, que sigue en `NOT_ASSESSED` y que ningún Gate va a automatizar. Todo lo
+que quede en `needs_review` espera a alguien, por diseño.
+
+En lo visual queda el estilo de producción: material propio de verdad en lugar
+del degradado, y resolver la redundancia entre rótulo y primer subtítulo.
 
 ## Ejecutar una corrida
 
@@ -676,7 +877,7 @@ runs/<run_id>/
 ├── overlay_spec.json     rótulo propio y sus parámetros de composición
 ├── overlay/
 │   └── overlay.ass       el rótulo
-├── provenance_ledger.json  de dónde viene cada recurso y cuál puede renderizarse
+├── provenance_ledger.json  fuentes, evidencia y decisiones de licencia
 ├── transformation_set.json los cinco elementos editoriales propios
 ├── qa_result.json        informe de QA técnica, con el juicio editorial aparte
 │
@@ -735,6 +936,12 @@ los contratos y su ausencia está cubierta por tests.
 El QA técnico está separado del juicio editorial y legal, que **no se
 automatiza**: que los elementos de transformación estén registrados no implica
 que una pieza sea jurídicamente transformativa ni monetizable.
+
+La decisión de procedencia tampoco lo implica. `render_allowed` significa que la
+procedencia registrada satisface la política técnica del sistema, y **no** afirma
+legalidad, ausencia de reclamaciones de copyright, compatibilidad con Content ID
+ni derecho a monetizar. No hay clasificador de uso legítimo: `fair_use_claim` es
+una afirmación de alguien y siempre acaba en `needs_review`.
 
 Las validaciones lingüísticas comprueban propiedades objetivas del texto. No
 puntúan la calidad editorial, que sigue siendo un juicio humano.

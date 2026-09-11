@@ -2,6 +2,7 @@
 
     python -m app run [--pipeline render|linguistic|voice|transformation|e2e]
                       [--run-id UUID] [--force STAGE] [--reference-asset RUTA]
+                      [--sources ARCHIVO]
     python -m app validate <run-id> [--pipeline ...]
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
@@ -22,7 +23,7 @@ from app.core.run_id import nuevo_run_id, parsear_run_id
 from app.pipeline.core import construir_pipeline, ejecutar_run, validar_run
 from app.pipeline.linguistic import construir_pipeline_linguistico
 from app.pipeline.qa import construir_pipeline_transformacion
-from app.pipeline.transformation import CLAVE_REFERENCIAS
+from app.pipeline.transformation import CLAVE_DECLARACIONES, CLAVE_REFERENCIAS
 from app.pipeline.voice import construir_pipeline_voz
 
 
@@ -100,6 +101,13 @@ def _construir_parser() -> argparse.ArgumentParser:
              "el render. Se puede repetir",
     )
     ejecutar.add_argument(
+        "--sources", default=None, metavar="ARCHIVO",
+        help="JSON que declara fuentes externas con su base de licencia y su "
+             "evidencia. La política decide la clase de cada una; declararlas no "
+             "las autoriza. No se descarga nada: las rutas locales deben existir "
+             "ya en el directorio de la corrida",
+    )
+    ejecutar.add_argument(
         "--force", default=None, metavar="ETAPA",
         help="re-ejecuta esta etapa aunque su artefacto sea válido",
     )
@@ -133,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
                 parametros["target_duration_seconds"] = args.target_duration
             if args.reference_asset:
                 parametros[CLAVE_REFERENCIAS] = args.reference_asset
+            if args.sources:
+                parametros[CLAVE_DECLARACIONES] = args.sources
             resultado = ejecutar_run(
                 run_id, settings, forzar=args.force,
                 parametros=parametros, etapas=etapas,
