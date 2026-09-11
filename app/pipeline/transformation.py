@@ -546,25 +546,14 @@ def procedencia_vigente(artefacto: ProvenanceLedger, ctx: ContextoEtapa) -> None
     if declaradas != registradas:
         raise ArtefactoCorrupto("cambiaron los recursos declarados como referencia")
 
-    # Una fuente externa que se declara, se retira o se modifica cambia lo que el
-    # ledger afirma, aunque los recursos propios sigan iguales. Se compara el
-    # contenido, no el número: editar la base alegada de una fuente no cambia
-    # cuántas hay y sí cambia lo que el ledger autoriza.
-    def perfil(basis: BaseLicencia | None, fuente: SourceAsset) -> tuple:
-        datos = fuente.model_dump(mode="json", exclude={"created_at"})
-        return (basis.value if basis else None, tuple(sorted(datos.items(), key=repr)))
-
-    alegadas = {f.asset_id: perfil(b, f) for b, f in _fuentes_externas(ctx)}
-    registradas_ext = {
-        f.asset_id: perfil(
-            d.basis if (d := artefacto.decision(f.asset_id)) else None, f
-        )
-        for f in artefacto.sources
-        if f.asset_id not in {f"{PREFIJO_PROPIO}:{p}" for p, *_ in _propios(ctx)}
-        and not f.asset_id.startswith("reference:")
-    }
-    if alegadas != registradas_ext:
-        raise ArtefactoCorrupto("cambiaron las fuentes externas declaradas")
+    # La integridad va antes que la comparación de declaraciones: si cambió el
+    # contenido de algo registrado, la decisión sobre ese contenido ya no aplica,
+    # y ese es el diagnóstico preciso. Dejarlo para después haría que un archivo
+    # externo modificado se reportara como «cambió la declaración», que es cierto
+    # pero dice menos.
+    for fuente in artefacto.sources:
+        if motivo := _huella_cambiada(fuente, ws):
+            raise ArtefactoCorrupto(f"la procedencia ya no describe el archivo: {motivo}")
 
     # Una política nueva no puede dar por buenas las decisiones de la anterior:
     # es exactamente el caso que policy_version existe para detectar.
@@ -575,11 +564,25 @@ def procedencia_vigente(artefacto: ProvenanceLedger, ctx: ContextoEtapa) -> None
             f"rige {VERSION_POLITICA}"
         )
 
-    # Y la integridad: si cambió el contenido de algo registrado, la decisión
-    # sobre ese contenido ya no aplica.
-    for fuente in artefacto.sources:
-        if motivo := _huella_cambiada(fuente, ws):
-            raise ArtefactoCorrupto(f"la procedencia ya no describe el archivo: {motivo}")
+    # Una fuente externa que se declara, se retira o se modifica cambia lo que el
+    # ledger afirma, aunque los recursos propios sigan iguales. Se compara el
+    # contenido, no el número: editar la base alegada de una fuente no cambia
+    # cuántas hay y sí cambia lo que el ledger autoriza.
+    def perfil(basis: BaseLicencia | None, fuente: SourceAsset) -> tuple:
+        datos = fuente.model_dump(mode="json", exclude={"created_at"})
+        return (basis.value if basis else None, tuple(sorted(datos.items(), key=repr)))
+
+    propias = {f"{PREFIJO_PROPIO}:{papel}" for papel, *_ in _propios(ctx)}
+    alegadas = {f.asset_id: perfil(b, f) for b, f in _fuentes_externas(ctx)}
+    registradas_ext = {
+        f.asset_id: perfil(
+            d.basis if (d := artefacto.decision(f.asset_id)) else None, f
+        )
+        for f in artefacto.sources
+        if f.asset_id not in propias and not f.asset_id.startswith("reference:")
+    }
+    if alegadas != registradas_ext:
+        raise ArtefactoCorrupto("cambiaron las fuentes externas declaradas")
 
 
 # ---------------------------------------------------------------------------
