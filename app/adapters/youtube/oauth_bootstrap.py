@@ -53,6 +53,7 @@ import hashlib
 import json
 import re
 import secrets
+import sys
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass, field
@@ -569,19 +570,40 @@ class ResultadoBootstrap:
         }
 
 
+def anunciar_en_stderr(mensaje: str) -> None:
+    """Escribe un mensaje para la persona, por stderr.
+
+    Es el destino por defecto de todo lo que este módulo le dice a quien ejecuta
+    el alta, y no stdout, porque el stdout de este flujo es un documento: una
+    línea de prosa delante del JSON lo deja sin parsear. Que el valor por defecto
+    sea el seguro evita que el próximo llamante reintroduzca el problema por
+    olvidarse de pasarlo.
+    """
+    print(mensaje, file=sys.stderr)
+
+
 def ejecutar_bootstrap(
     settings: Settings,
     ruta_credenciales: str | Path,
     *,
     timeout_callback_s: int = TIMEOUT_CALLBACK_S,
     forzar_consentimiento: bool = False,
-    abrir_navegador=webbrowser.open,
-    anunciar=print,
+    abrir_navegador=None,
+    anunciar=anunciar_en_stderr,
 ) -> ResultadoBootstrap:
     """Hace el alta completa y termina comprobando contra el AUTH CHECK existente.
 
     ``abrir_navegador`` y ``anunciar`` se inyectan para poder probar el flujo
     entero sin abrir un navegador ni ensuciar la salida de los tests.
+
+    ``abrir_navegador`` se resuelve **dentro** y no como valor por defecto del
+    parámetro: un ``def f(x=webbrowser.open)`` captura la función al definirse, y
+    entonces sustituir ``webbrowser.open`` desde fuera no tiene ningún efecto. Eso
+    hacía imposible probar el camino del CLI de punta a punta.
+
+    ``anunciar`` escribe por **stderr**: lo que va por stdout es solo el
+    documento del resultado, y mezclarlos haría que no se pudiera leer con una
+    herramienta.
 
     El alcance es el que diga ``YOUTUBE_SCOPE``, que por defecto sigue siendo el
     mínimo. **Este flujo no lo amplía por su cuenta**: si resulta que no basta, lo
@@ -611,7 +633,7 @@ def ejecutar_bootstrap(
             f"Esperando la respuesta en {servidor.redirect_uri} "
             f"(hasta {timeout_callback_s}s)…"
         )
-        abrir_navegador(url)
+        (abrir_navegador or webbrowser.open)(url)
         codigo = servidor.esperar_codigo(state, timeout_s=timeout_callback_s)
 
     tokens = canjear_codigo(

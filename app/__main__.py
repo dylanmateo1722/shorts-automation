@@ -206,7 +206,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"    {resultado.refresh_token}\n",
                 file=sys.stderr,
             )
-            return 0 if resultado.comprobacion.autenticado else 1
+            # Mismo criterio que ``youtube-auth``, y no ``autenticado``: ese es
+            # cierto también para WRONG_CHANNEL —la credencial sirvió— y un
+            # script que mirara el código de salida daría por bueno un canal
+            # equivocado. ``AUTHENTICATED`` ya implica las dos cosas: el token
+            # funcionó y, si había canal esperado, coincidía.
+            return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
 
         etapas = PIPELINES[args.pipeline]()
 

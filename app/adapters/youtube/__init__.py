@@ -37,6 +37,7 @@ from app.adapters.youtube.oauth_bootstrap import (  # noqa: F401
     ResultadoBootstrap,
     ServidorCallback,
     TokensObtenidos,
+    anunciar_en_stderr,
     canjear_codigo,
     cargar_cliente,
     construir_url_autorizacion,

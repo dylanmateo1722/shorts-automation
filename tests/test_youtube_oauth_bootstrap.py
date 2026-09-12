@@ -951,3 +951,253 @@ def test_el_auth_check_sigue_funcionando_como_siempre(monkeypatch, llamadas):
     assert comprobacion.resultado is ResultadoAuth.autenticado
     # Dos llamadas: canje del refresh token y lectura del canal.
     assert len(llamadas) == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. El comando: código de salida y limpieza de stdout
+#
+# Se invoca ``main()`` de verdad, no las funciones por debajo: lo que se está
+# comprobando es el contrato del comando —qué devuelve al shell y qué escribe en
+# cada flujo—, y eso solo existe en el CLI.
+# ---------------------------------------------------------------------------
+
+
+def _ejecutar_cli(credenciales_json, *, respuesta_navegador=None, argumentos=None):
+    """Corre ``python -m app youtube-auth-bootstrap`` capturando los dos flujos.
+
+    El navegador se sustituye parcheando ``webbrowser.open``, que es el valor por
+    defecto del flujo: así se ejercita el camino real del comando y no una
+    inyección que en producción nadie usa.
+    """
+    import http.client
+    from contextlib import redirect_stderr, redirect_stdout
+
+    from app.__main__ import main
+
+    def navegador(url: str) -> bool:
+        parametros = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        destino = parametros["redirect_uri"][0]
+        state = parametros["state"][0]
+        respuesta = respuesta_navegador or {"code": CODIGO_FALSO, "state": state}
+
+        def visitar():
+            partes = urllib.parse.urlparse(destino)
+            conexion = http.client.HTTPConnection(
+                partes.hostname, partes.port, timeout=5
+            )
+            conexion.request(
+                "GET", f"{partes.path}?{urllib.parse.urlencode(respuesta)}"
+            )
+            conexion.getresponse().read()
+            conexion.close()
+
+        threading.Thread(target=visitar, daemon=True).start()
+        return True
+
+    import webbrowser
+
+    original = webbrowser.open
+    webbrowser.open = navegador
+    salida, error = io.StringIO(), io.StringIO()
+    try:
+        with redirect_stdout(salida), redirect_stderr(error):
+            codigo = main(
+                [
+                    "youtube-auth-bootstrap",
+                    "--credentials",
+                    str(credenciales_json),
+                    "--timeout",
+                    "15",
+                    *(argumentos or []),
+                ]
+            )
+    finally:
+        webbrowser.open = original
+    return codigo, salida.getvalue(), error.getvalue()
+
+
+def test_el_comando_sale_con_cero_cuando_el_canal_es_el_esperado(
+    entorno, credenciales_json, llamadas, monkeypatch
+):
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", CANAL)
+    _preparar(llamadas)
+    codigo, salida, _ = _ejecutar_cli(credenciales_json)
+
+    assert json.loads(salida)["result"] == "AUTHENTICATED"
+    assert json.loads(salida)["correct_channel"] is True
+    assert codigo == 0
+
+
+def test_el_comando_sale_con_cero_sin_canal_esperado_configurado(
+    entorno, credenciales_json, llamadas
+):
+    """No hay nada contra lo que comparar, y el alta es lícita igualmente."""
+    _preparar(llamadas)
+    codigo, salida, _ = _ejecutar_cli(credenciales_json)
+
+    datos = json.loads(salida)
+    assert datos["result"] == "AUTHENTICATED"
+    assert datos["expected_channel_id"] is None
+    assert codigo == 0
+
+
+def test_el_comando_no_sale_con_cero_si_el_canal_no_coincide(
+    entorno, credenciales_json, llamadas, monkeypatch
+):
+    """El caso que motivó la corrección.
+
+    La credencial funciona —``authenticated`` es verdadero— y aun así el comando
+    tiene que fallar: un script que mirara el código de salida daría por bueno un
+    canal equivocado.
+    """
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UCotroCanalDistinto00001")
+    _preparar(llamadas)
+    codigo, salida, _ = _ejecutar_cli(credenciales_json)
+
+    datos = json.loads(salida)
+    assert datos["result"] == "WRONG_CHANNEL"
+    assert datos["authenticated"] is True, "la credencial sí sirvió"
+    assert datos["correct_channel"] is False
+    assert codigo != 0
+
+
+def test_el_comando_no_sale_con_cero_con_alcance_insuficiente(
+    entorno, credenciales_json, llamadas
+):
+    _preparar(llamadas)
+    llamadas.respuestas[ENDPOINT_CANALES] = _http_error(
+        403, {"error": {"errors": [{"reason": "insufficientPermissions"}]}}
+    )
+    codigo, salida, _ = _ejecutar_cli(credenciales_json)
+
+    assert json.loads(salida)["result"] == "INSUFFICIENT_SCOPE"
+    assert codigo != 0
+
+
+def test_el_comando_no_sale_con_cero_con_un_fallo_transitorio(
+    entorno, credenciales_json, llamadas
+):
+    _preparar(llamadas)
+    llamadas.respuestas[ENDPOINT_CANALES] = _http_error(503)
+    codigo, salida, _ = _ejecutar_cli(credenciales_json)
+
+    assert json.loads(salida)["result"] == "TRANSIENT_ERROR"
+    assert codigo != 0
+
+
+def test_ningun_desenlace_salvo_authenticated_sale_con_cero():
+    """Se comprueba sobre el criterio, no solo sobre los casos que se simulan.
+
+    Así un desenlace nuevo no nace con código de salida 0 por descuido.
+    """
+    for desenlace in ResultadoAuth:
+        comprobacion = modulo_auth.ComprobacionAuth(resultado=desenlace, detalle="x")
+        sale_con_cero = comprobacion.resultado is ResultadoAuth.autenticado
+        assert sale_con_cero == (desenlace is ResultadoAuth.autenticado), desenlace
+        if desenlace is ResultadoAuth.canal_incorrecto:
+            assert comprobacion.autenticado is True and not sale_con_cero
+
+
+def test_el_stdout_del_comando_es_json_puro(entorno, credenciales_json, llamadas):
+    """Parseable directamente, sin recortar nada.
+
+    El alta imprime mensajes para la persona —la URL del consentimiento entre
+    ellos— y ninguno puede caer en stdout: ``json.loads`` sobre la salida entera
+    es la comprobación más exigente posible.
+    """
+    _preparar(llamadas)
+    codigo, salida, error = _ejecutar_cli(credenciales_json)
+
+    datos = json.loads(salida)  # sin .index("{"), sin splitlines, sin filtrar
+    assert datos["result"] == "AUTHENTICATED"
+    assert codigo == 0
+
+    # Y los mensajes humanos sí aparecieron: el test no pasa por no haber nada.
+    assert "Se abrirá el navegador" in error
+    assert "accounts.google.com" in error, "la URL de consentimiento va por stderr"
+    assert "Esperando la respuesta" in error
+
+
+def test_la_url_de_consentimiento_nunca_cae_en_stdout(
+    entorno, credenciales_json, llamadas
+):
+    _preparar(llamadas)
+    _, salida, _ = _ejecutar_cli(credenciales_json)
+
+    assert "accounts.google.com" not in salida
+    assert "code_challenge" not in salida
+    assert "127.0.0.1" not in salida
+
+
+def test_el_stdout_sigue_limpio_cuando_el_comando_falla(
+    entorno, credenciales_json, llamadas, monkeypatch
+):
+    """Un fallo tampoco rompe el documento: el JSON se imprime igual."""
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UCotroCanal000000000001")
+    _preparar(llamadas)
+    codigo, salida, _ = _ejecutar_cli(credenciales_json)
+
+    assert json.loads(salida)["result"] == "WRONG_CHANNEL"
+    assert codigo != 0
+
+
+def test_el_anunciador_por_defecto_escribe_en_stderr():
+    """El valor por defecto es el seguro, no algo que haya que recordar pasar."""
+    import inspect
+    from contextlib import redirect_stderr, redirect_stdout
+
+    assert (
+        inspect.signature(ejecutar_bootstrap).parameters["anunciar"].default
+        is bootstrap.anunciar_en_stderr
+    )
+
+    salida, error = io.StringIO(), io.StringIO()
+    with redirect_stdout(salida), redirect_stderr(error):
+        bootstrap.anunciar_en_stderr("un mensaje para la persona")
+    assert salida.getvalue() == ""
+    assert "un mensaje para la persona" in error.getvalue()
+
+
+def test_el_comando_no_expone_el_codigo_de_autorizacion(
+    entorno, credenciales_json, llamadas
+):
+    _preparar(llamadas)
+    _, salida, error = _ejecutar_cli(credenciales_json)
+
+    assert CODIGO_FALSO not in salida
+    assert CODIGO_FALSO not in error
+
+
+def test_el_comando_sigue_sin_poner_el_refresh_token_en_stdout(
+    entorno, credenciales_json, llamadas
+):
+    """La corrección del stdout no debe haber movido el token de sitio."""
+    _preparar(llamadas)
+    _, salida, error = _ejecutar_cli(credenciales_json)
+
+    assert REFRESH_FALSO not in salida
+    assert json.loads(salida)["refresh_token_hint"] != REFRESH_FALSO
+    # Sigue saliendo por stderr, como hasta ahora y como está documentado.
+    assert REFRESH_FALSO in error
+
+
+def test_el_comando_de_comprobacion_conserva_su_codigo_de_salida(
+    monkeypatch, llamadas, credenciales_json
+):
+    """``youtube-auth`` no cambia: ya usaba el criterio correcto."""
+    from contextlib import redirect_stderr, redirect_stdout
+
+    from app.__main__ import main
+
+    monkeypatch.setenv("YOUTUBE_CLIENT_ID", "x-largo-suficiente")
+    monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "y-largo-suficiente")
+    monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "z-largo-suficiente")
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UCotroCanal000000000001")
+    _preparar(llamadas)
+
+    salida, error = io.StringIO(), io.StringIO()
+    with redirect_stdout(salida), redirect_stderr(error):
+        codigo = main(["youtube-auth"])
+
+    assert json.loads(salida.getvalue())["result"] == "WRONG_CHANNEL"
+    assert codigo != 0
