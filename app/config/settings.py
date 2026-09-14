@@ -228,6 +228,22 @@ class Settings:
 
         return os.environ.get("YOUTUBE_SCOPE", "").strip() or SCOPE_SUBIDA
 
+    @property
+    def youtube_device_scope(self) -> str:
+        """Alcance OAuth del alta por dispositivo, y **solo** de ella.
+
+        Es una variable aparte de ``YOUTUBE_SCOPE`` a propósito, y no un valor
+        nuevo para aquella: el flujo de dispositivo admite una lista cerrada de
+        alcances en la que ``youtube.upload`` **no está**, así que necesita uno
+        distinto; pero eso es una limitación de ese flujo, no una decisión sobre
+        el resto de la arquitectura. Con dos variables, cambiar una no cambia la
+        otra en silencio, y el alcance mínimo de D17 sigue siendo el que usa todo
+        lo demás.
+        """
+        from app.adapters.youtube.auth import SCOPE_GESTION
+
+        return os.environ.get("YOUTUBE_DEVICE_SCOPE", "").strip() or SCOPE_GESTION
+
     def verificar_llm(self) -> None:
         """Comprueba que hay proveedor configurado antes de gastar en llamadas.
 

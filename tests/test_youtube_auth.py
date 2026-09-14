@@ -659,12 +659,17 @@ def test_el_codigo_solo_puede_alcanzar_los_endpoints_de_autenticacion():
         "https://oauth2.googleapis.com/token",
         "https://www.googleapis.com/youtube/v3/channels",
         "https://accounts.google.com/o/oauth2/v2/auth",
+        # Los dos alcances. Ninguno es un endpoint: son identificadores. El
+        # primero es el mínimo de D17, que usa todo salvo el alta por
+        # dispositivo; el segundo existe porque ese flujo admite una lista
+        # cerrada de alcances en la que el primero **no está**.
         "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube",
     }
 
 
 def test_ninguna_url_del_codigo_es_de_subida():
-    """Y de esas cuatro, ninguna es un endpoint de escritura de vídeos."""
+    """Y de esas cinco, ninguna es un endpoint de escritura de vídeos."""
     for url in _urls_del_codigo():
         assert "/videos" not in url
         assert "uploadType" not in url

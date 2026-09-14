@@ -987,14 +987,20 @@ hay subida, no hay `videos.insert` y no hay publisher.
 
 ```
 app/adapters/youtube/
-├── auth.py              comprueba una autorización que YA existe
-└── oauth_bootstrap.py   la OBTIENE, una vez, a mano, con navegador
+├── auth.py               comprueba una autorización que YA existe
+├── oauth_bootstrap.py    la OBTIENE con navegador y callback en loopback
+└── device_bootstrap.py   la OBTIENE sin navegador: un código en otra pantalla
 ```
 
 Dos momentos distintos de la vida del proyecto: `auth` corre en cada
-comprobación y en CI; `oauth_bootstrap` corre una vez cada muchos meses y **nunca**
-en CI. El alta reutiliza el AUTH CHECK de `auth` en vez de duplicar la
+comprobación y en CI; las dos altas corren una vez cada muchos meses y **nunca**
+en CI. Ambas reutilizan el AUTH CHECK de `auth` en vez de duplicar la
 clasificación de desenlaces.
+
+Las altas son alternativas entre sí y se eligen por el entorno, no por gusto: si
+hay navegador en la misma máquina, `oauth_bootstrap`; si quien opera solo tiene
+un teléfono, `device_bootstrap`. Ver «Alta OAuth por dispositivo» para la
+excepción de alcance que eso obliga a aceptar.
 
 Cuando exista el publisher será otro módulo **hermano**, no una ampliación de
 ninguno de estos: la autenticación tiene que poder comprobarse
@@ -1016,6 +1022,12 @@ https://www.googleapis.com/auth/youtube.upload
 ```
 
 Uno solo, el mínimo que fija D17, configurable con `YOUTUBE_SCOPE`.
+
+**Con una excepción aprobada y acotada:** el alta por dispositivo no puede
+pedirlo, porque ese flujo admite una lista cerrada de alcances en la que
+`youtube.upload` no está. Usa `.../auth/youtube`, que es más amplio, y lo hace
+desde una variable distinta para que esto no se propague al resto. Ver «Alta
+OAuth por dispositivo».
 
 **Hay una incertidumbre documentada aquí.** `videos.insert` publica la lista de
 alcances que acepta; `channels.list` **no publica ninguna** —su apartado de
@@ -1063,7 +1075,8 @@ y pedir menos datos es la misma disciplina que pedir el alcance mínimo.
 | `YOUTUBE_CLIENT_SECRET` | secreto de la aplicación | **sí** |
 | `YOUTUBE_REFRESH_TOKEN` | la autorización persistente del canal | **sí** |
 | `EXPECTED_YOUTUBE_CHANNEL_ID` | canal en el que se permite publicar | no |
-| `YOUTUBE_SCOPE` | alcance; vacío usa el mínimo | no |
+| `YOUTUBE_SCOPE` | alcance; vacío usa el mínimo de D17 | no |
+| `YOUTUBE_DEVICE_SCOPE` | alcance del alta por dispositivo **y solo de ella**; vacío usa `.../auth/youtube` | no |
 | `YOUTUBE_TIMEOUT_S` | tiempo máximo por petición (30) | no |
 
 Las tres credenciales son **propiedades** de `Settings`, no campos del dataclass,
@@ -1129,20 +1142,31 @@ Cuatro barreras, no una:
    envió—: se extrae solo la etiqueta corta del campo `error` y se descarta el
    resto, `error_description` incluida;
 4. el redactor del proyecto enmascara cualquier valor cuyo nombre de variable
-   contenga `TOKEN` o `SECRET`, por si algo se colara pese a lo anterior.
+   contenga `TOKEN` o `SECRET`, por si algo se colara pese a lo anterior;
+5. y además reconoce la **forma** de un refresh token de Google (`1//…`), así que
+   queda cubierto aunque no venga del entorno.
+
+Para los secretos que nacen en tiempo de ejecución y no tienen ni nombre de
+variable ni forma reconocible —el `device_code` es el caso— el redactor acepta un
+**registro explícito** (`registrar_secreto`). El alta por dispositivo lo usa en
+cuanto recibe el código, antes de que exista ninguna oportunidad de que aparezca
+en una traza.
 
 Hay un test que recorre logs, stdout, stderr, el resultado serializado y el `repr`
 de cada objeto que toca la credencial, buscando el token de prueba.
 
-### Dos comandos que no significan lo mismo
+### Tres comandos que no significan lo mismo
 
 | Comando | Qué hace | Cuándo se usa |
 |---|---|---|
-| `youtube-auth-bootstrap` | **obtiene** la autorización | una vez, a mano, con navegador |
+| `youtube-auth-bootstrap` | **obtiene** la autorización, con navegador local | una vez, en una máquina de escritorio |
+| `youtube-auth-device` | **obtiene** la autorización, sin navegador | una vez, cuando solo hay un teléfono |
 | `youtube-auth` | **comprueba** una autorización ya configurada | en cada verificación y en CI |
 
-El primero abre un navegador y produce un refresh token. El segundo no abre nada
-y no produce nada: solo dice si lo que hay configurado sirve.
+Las dos altas son **alternativas**, no etapas de lo mismo: producen la misma
+credencial por caminos distintos, y piden **alcances distintos** (ver «Alta OAuth
+por dispositivo»). La comprobación no abre nada y no produce nada: solo dice si
+lo que hay configurado sirve.
 
 ### Alta OAuth local (una sola vez)
 
@@ -1195,6 +1219,103 @@ EXPECTED_YOUTUBE_CHANNEL_ID=UC...
 
 En local van en tu `.env`, que está en `.gitignore`. En CI van como secretos del
 repositorio.
+
+### Alta OAuth por dispositivo (una sola vez, sin navegador)
+
+```bash
+python -m app youtube-auth-device --credentials ~/client_secret_....json
+```
+
+**Por qué existe.** El alta anterior necesita un navegador que pueda alcanzar el
+`127.0.0.1` **de la propia máquina** que ejecuta el comando. Cuando quien opera
+solo tiene un teléfono y el orquestador corre en una máquina remota, eso no se
+puede cumplir: la redirección de Google iría al loopback del teléfono, donde no
+escucha nada. El flujo de dispositivo resuelve exactamente ese caso, y lo
+resuelve como Google lo documenta: la máquina enseña un código, la persona lo
+teclea en otra pantalla, y la máquina sondea hasta que la autorización aparece.
+
+**No hay redirección, no hay callback y no hay ningún servidor escuchando.**
+
+Lo que ocurre, en orden:
+
+1. se leen del JSON **solo** `client_id` y `client_secret`;
+2. se piden los códigos a `https://oauth2.googleapis.com/device/code` con
+   `client_id` y `scope` —el `client_secret` todavía no viaja—;
+3. se muestran por **stderr** la dirección de verificación y el `user_code`;
+4. se intenta abrir el navegador, pero es una cortesía: si no hay ninguno, el
+   alta sigue igual;
+5. se sondea `https://oauth2.googleapis.com/token` con
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code`, respetando el
+   `interval` y alargándolo ante cada `slow_down`;
+6. se ejecuta el mismo AUTH CHECK de `youtube-auth` con el token recién obtenido.
+
+#### ⚠️ Excepción aprobada de D17: el alcance
+
+```
+https://www.googleapis.com/auth/youtube      ← esta alta
+https://www.googleapis.com/auth/youtube.upload  ← D17, todo lo demás
+```
+
+El flujo de dispositivo admite una **lista cerrada** de alcances, y para YouTube
+solo contiene `.../auth/youtube` y `.../auth/youtube.readonly`.
+**`youtube.upload` no está en ella**, así que esta alta no puede pedirlo. El
+segundo de la lista no sube nada, de modo que el único que sirve es el primero.
+
+Que sirve está comprobado en la otra punta: `videos.insert` publica su lista de
+alcances autorizantes y `.../auth/youtube` está en ella.
+
+**El precio, dicho claro:** `.../auth/youtube` es «gestionar tu cuenta de
+YouTube», no «subir vídeos». Un refresh token obtenido por esta vía permite
+administrar el canal —incluido borrar vídeos—, así que **hace más daño si se
+filtra** que uno con el alcance mínimo. Protégelo en consecuencia: fuera del
+repositorio, fuera de `runs/`, fuera de los artefactos, y como secreto del
+repositorio en CI.
+
+**Esto es una excepción de este flujo, no un cambio de la arquitectura.**
+`youtube.upload` sigue siendo el alcance conceptual mínimo del publisher, y el
+alta de escritorio lo sigue usando. Por eso son dos variables y no una:
+`YOUTUBE_SCOPE` para lo general y `YOUTUBE_DEVICE_SCOPE` para esta alta. Cambiar
+una no cambia la otra, y hay un test que lo comprueba.
+
+#### Por qué aquí no hay PKCE ni `state`
+
+Porque el protocolo no los tiene. PKCE ata un código de autorización a quien
+inició la petición, y `state` ata la respuesta del navegador a la petición que la
+provocó: las dos cosas protegen una **redirección**, y aquí no hay ninguna. La
+documentación de Google para este flujo no menciona ni uno ni otro.
+
+Lo que cumple esa función es el `device_code`: Google solo entrega los tokens a
+quien lo presente junto al `client_secret`, y **nunca sale de este proceso**.
+Añadir PKCE de adorno sería peor que no tenerlo — sugeriría una protección que el
+protocolo no está aplicando.
+
+#### Los dos códigos se tratan al revés a propósito
+
+| Código | Dónde puede aparecer | Por qué |
+|---|---|---|
+| `user_code` | stderr, para que la persona lo lea | Google lo define como el código que hay que teclear; ocultarlo rompería el flujo |
+| `device_code` | **en ningún sitio** | es la credencial de este proceso: ni stdout, ni stderr, ni logs, ni `repr`, ni el JSON del resultado |
+
+El `device_code` es una cadena opaca: no tiene nombre de variable ni forma
+reconocible, así que ni la redacción por nombre ni la de patrón pueden cubrirlo.
+Por eso se **registra explícitamente** en el redactor en cuanto se recibe, y el
+filtro del logger lo enmascara desde ese momento pase lo que pase.
+
+#### Credenciales
+
+Hace falta un cliente OAuth de tipo **«TVs and Limited Input devices»** creado en
+Google Cloud. No es el mismo que el de escritorio y **no se puede convertir uno
+en otro**: son clientes distintos. Su `client_secret` no es un secreto fuerte —
+viaja dentro del programa y Google lo asume—, pero aun así no se registra, no se
+imprime y no se persiste.
+
+#### Nada de timeout infinito
+
+El plazo lo fija `expires_in`, que viene de Google, y no hay forma de
+desactivarlo. Un 5xx o un corte de red **no abortan** el consentimiento —la
+persona está autorizando en otra pantalla y tirar el proceso por un bache la
+obligaría a empezar de cero—, pero el plazo sigue acotándolo todo, así que el
+sondeo no puede girar sin fin.
 
 ### Comprobar la autorización
 
@@ -1254,9 +1375,13 @@ ejecuta en CI, no contiene credenciales y no sube nada.
 de vídeos, programación, Discovery, analytics, multi-canal, publicación pública y
 la política de reintentos.
 
-El consentimiento OAuth inicial **sí** está implementado, como alta interactiva
-local: ver «Alta OAuth local». Lo que no se automatiza es ejecutarlo sin una
-persona delante, y eso es deliberado — el consentimiento lo da un humano.
+El consentimiento OAuth inicial **sí** está implementado, por dos caminos: alta
+local con navegador y alta por dispositivo. Lo que no se automatiza es ejecutarlo
+sin una persona delante, y eso es deliberado — el consentimiento lo da un humano.
+
+Tampoco entra en G7.1 nada de Google Cloud: crear el cliente OAuth, publicar la
+pantalla de consentimiento y la verificación de la aplicación son pasos manuales
+de quien administra el proyecto, y este repositorio no los toca.
 
 ### Qué queda por resolver
 

@@ -6,6 +6,7 @@
     python -m app validate <run-id> [--pipeline ...]
     python -m app youtube-auth
     python -m app youtube-auth-bootstrap --credentials RUTA
+    python -m app youtube-auth-device --credentials RUTA
 
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
@@ -149,6 +150,19 @@ def _construir_parser() -> argparse.ArgumentParser:
              "access token pero ningún refresh token",
     )
 
+    dispositivo = sub.add_parser(
+        "youtube-auth-device",
+        help="alta OAuth por flujo de dispositivo: enseña un código para "
+             "teclear en otra pantalla. No necesita navegador ni callback, y "
+             "NO sube nada",
+    )
+    dispositivo.add_argument(
+        "--credentials", required=True, metavar="RUTA",
+        help="ruta al JSON del cliente OAuth de tipo «TVs and Limited Input "
+             "devices» descargado de Google Cloud. El archivo NO se copia ni se "
+             "versiona: solo se leen de él client_id y client_secret",
+    )
+
     return parser
 
 
@@ -164,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         getattr(logging, settings.log_level, logging.INFO),
         stream=(
             sys.stderr
-            if args.comando in ("youtube-auth", "youtube-auth-bootstrap")
+            if args.comando
+            in ("youtube-auth", "youtube-auth-bootstrap", "youtube-auth-device")
             else None
         ),
     )
@@ -211,6 +226,27 @@ def main(argv: list[str] | None = None) -> int:
             # script que mirara el código de salida daría por bueno un canal
             # equivocado. ``AUTHENTICATED`` ya implica las dos cosas: el token
             # funcionó y, si había canal esperado, coincidía.
+            return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
+
+        if args.comando == "youtube-auth-device":
+            from app.adapters.youtube import (
+                ResultadoAuth,
+                ejecutar_alta_dispositivo,
+                instrucciones_dispositivo,
+            )
+
+            resultado = ejecutar_alta_dispositivo(settings, args.credentials)
+            # Mismo contrato de salida que el alta de escritorio: el documento
+            # por stdout sin el token, y el token aparte por stderr.
+            print(json.dumps(resultado.a_dict(), indent=2, ensure_ascii=False))
+            print("\n" + instrucciones_dispositivo(resultado), file=sys.stderr)
+            print(
+                f"REFRESH TOKEN (cópialo ahora, no se guarda en ningún sitio):\n\n"
+                f"    {resultado.refresh_token}\n",
+                file=sys.stderr,
+            )
+            # Y el mismo criterio de código de salida, por el mismo motivo:
+            # ``autenticado`` también es cierto para WRONG_CHANNEL.
             return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
 
         etapas = PIPELINES[args.pipeline]()

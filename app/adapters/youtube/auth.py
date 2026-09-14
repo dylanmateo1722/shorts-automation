@@ -81,7 +81,27 @@ ENDPOINT_CANALES = "https://www.googleapis.com/youtube/v3/channels"
 ENDPOINT_AUTORIZACION = "https://accounts.google.com/o/oauth2/v2/auth"
 
 #: Alcance mínimo que fija D17. Uno solo, y el más estrecho que permite subir.
+#: **Sigue siendo el alcance conceptual mínimo del publisher**: la excepción de
+#: más abajo es del alta por dispositivo, no de la arquitectura.
 SCOPE_SUBIDA = "https://www.googleapis.com/auth/youtube.upload"
+
+#: Alcance del alta por dispositivo, y **solo** de ella. Es una excepción
+#: aprobada de D17, no su sustituto.
+#:
+#: Existe porque el flujo de dispositivo admite una lista cerrada de alcances y
+#: ``youtube.upload`` **no está en ella**: la documentación de Google para el
+#: flujo de dispositivo de la YouTube Data API solo permite
+#: ``.../auth/youtube`` y ``.../auth/youtube.readonly``. El segundo no puede
+#: subir, así que el único que sirve es este.
+#:
+#: Que sirva está comprobado en la otra punta: ``videos.insert`` publica su lista
+#: de alcances autorizantes y ``.../auth/youtube`` está en ella.
+#:
+#: Es **más amplio** que ``SCOPE_SUBIDA``: «gestionar tu cuenta de YouTube», no
+#: «subir vídeos». Un refresh token con este alcance puede hacer más daño si se
+#: filtra, y por eso la excepción está escrita aquí y en el README en vez de
+#: quedar como un valor por defecto que nadie recuerda haber elegido.
+SCOPE_GESTION = "https://www.googleapis.com/auth/youtube"
 
 #: Códigos HTTP que merecen otro intento. 429 se trata aparte.
 CODIGOS_TRANSITORIOS = frozenset({500, 502, 503, 504})
@@ -474,6 +494,7 @@ def comprobar_autenticacion(
     timeout_s: int | None = None,
     token: TokenAcceso | None = None,
     exigir_canal_esperado: bool = True,
+    scope_solicitado: str | None = None,
 ) -> ComprobacionAuth:
     """Comprueba credenciales, identidad del canal y coincidencia con el esperado.
 
@@ -484,8 +505,8 @@ def comprobar_autenticacion(
 
     **Nunca devuelve un resultado que autorice a seguir si el canal no coincide.**
 
-    Los dos parámetros opcionales existen para el alta interactiva, que llega
-    aquí en una situación distinta y no debería duplicar esta lógica:
+    Los tres parámetros opcionales existen para las altas interactivas, que
+    llegan aquí en una situación distinta y no deberían duplicar esta lógica:
 
     * ``token`` evita el canje del refresh token. El alta acaba de obtener un
       access token y todavía **no** hay refresh token en el entorno: leerlo de
@@ -494,12 +515,16 @@ def comprobar_autenticacion(
       ``EXPECTED_YOUTUBE_CHANNEL_ID``, porque el alta es justo el momento en que
       se averigua cuál es el canal. Si está configurado se compara igual, y una
       discrepancia sigue dando ``WRONG_CHANNEL``.
+    * ``scope_solicitado`` dice qué alcance se pidió **de verdad**. Hace falta
+      porque el alta por dispositivo no usa ``YOUTUBE_SCOPE``: usa el suyo, más
+      amplio, y sin esto el resultado declararía un alcance que nadie pidió. El
+      alcance *concedido* sigue saliendo de lo que responda Google, no de aquí.
 
     Con los valores por defecto el comportamiento es exactamente el de siempre.
     """
     timeout = timeout_s if timeout_s is not None else settings.youtube_timeout_s
     esperado = settings.expected_youtube_channel_id.strip()
-    scope = settings.youtube_scope
+    scope = scope_solicitado if scope_solicitado is not None else settings.youtube_scope
 
     def resultado(tipo: ResultadoAuth, detalle: str, **extra) -> ComprobacionAuth:
         comprobacion = ComprobacionAuth(

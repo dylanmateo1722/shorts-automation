@@ -418,6 +418,55 @@ jobs:
           print(f"AUTH CHECK sin credenciales: {datos['result']}, sin filtraciones")
           PY
 
+      # El alta por dispositivo tampoco tiene credenciales en CI y nunca debe
+      # tenerlas: es interactiva por definición. Lo que se demuestra aquí es que
+      # el comando existe, que sin el JSON del cliente falla de forma explícita
+      # y que por ese camino no se contacta con Google ni se filtra nada.
+      - name: El alta por dispositivo falla con claridad sin credenciales
+        run: |
+          set +e
+          .venv/bin/python -m app youtube-auth-device \
+            --credentials /tmp/no-existe-jamas.json > /tmp/dev.json 2> /tmp/dev.log
+          CODIGO=$?
+          set -e
+          test "$CODIGO" = "2" || { echo "se esperaba salida 2, hubo $CODIGO"; exit 1; }
+
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+
+          salida = Path("/tmp/dev.json").read_text(encoding="utf-8")
+          error = Path("/tmp/dev.log").read_text(encoding="utf-8")
+
+          # stdout es un documento: si no hay documento, queda vacío.
+          assert salida.strip() == "", repr(salida)
+          assert "EntradaInvalida" in error, error
+          assert "TVs and Limited Input devices" in error, error
+
+          for prohibido in ("refresh_token", "client_secret", "device_code", "ya29.", "1//"):
+              assert prohibido not in error.lower(), prohibido
+
+          print("Alta por dispositivo sin credenciales: falla limpio, sin filtraciones")
+          PY
+
+      # El alcance del alta por dispositivo es una excepción aprobada de D17, y
+      # una excepción que se propaga en silencio deja de ser una excepción.
+      - name: Los dos alcances siguen separados
+        run: |
+          .venv/bin/python - <<'PY'
+          from app.adapters.youtube.auth import SCOPE_GESTION, SCOPE_SUBIDA
+          from app.config.settings import Settings
+
+          s = Settings.desde_entorno()
+          assert s.youtube_scope == SCOPE_SUBIDA, s.youtube_scope
+          assert s.youtube_device_scope == SCOPE_GESTION, s.youtube_device_scope
+          assert SCOPE_SUBIDA.endswith("/auth/youtube.upload"), SCOPE_SUBIDA
+          assert SCOPE_GESTION.endswith("/auth/youtube"), SCOPE_GESTION
+          assert s.youtube_scope != s.youtube_device_scope
+
+          print(f"D17: {SCOPE_SUBIDA}")
+          print(f"dispositivo (excepcion aprobada): {SCOPE_GESTION}")
+          PY
+
       - name: Publicar artefactos de voz, transformación y QA
         if: always()
         uses: actions/upload-artifact@v4
