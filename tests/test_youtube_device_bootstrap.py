@@ -62,7 +62,6 @@ from app.core.errors import (
     RespuestaInvalida,
     TiempoAgotado,
 )
-from app.core.logging import configurar_logging
 from app.core.redaction import olvidar_secretos, redactar
 
 CLIENT_ID_FALSO = "fake-device-id.apps.googleusercontent.invalid"
@@ -735,6 +734,10 @@ def test_el_alta_completa_obtiene_el_token_y_comprueba_el_canal(
     _preparar(llamadas)
     resultado, abierto, _ = _alta(entorno, credenciales_json)
 
+    assert isinstance(resultado, ResultadoDispositivo), (
+        "cada alta devuelve su propio resultado: el JSON de una no debe poder "
+        "confundirse con el de la otra"
+    )
     assert resultado.refresh_token == REFRESH_FALSO
     assert resultado.comprobacion.resultado is ResultadoAuth.autenticado
     assert resultado.comprobacion.channel_id == CANAL
