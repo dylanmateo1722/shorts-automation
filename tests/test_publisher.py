@@ -21,7 +21,7 @@ from app.contracts.models import (
     clave_idempotencia,
 )
 from app.core.errors import TiempoAgotado
-from app.adapters.youtube.publisher import MAX_INTENTOS, publicar
+from app.adapters.youtube.publisher import MAX_INTENTOS, MAX_SESIONES, publicar
 from app.adapters.youtube.upload import MULTIPLO_FRAGMENTO
 from app.pipeline.publicacion import ResultadoGate
 
@@ -476,3 +476,179 @@ def test_critico_tras_reiniciar_el_proceso_no_se_puede_resubir_sin_reconciliar(
         job.transicionar(EstadoPublicacion.subiendo, metadata=metadata())
     with pytest.raises(ValueError, match="transición no permitida"):
         job.transicionar(EstadoPublicacion.listo)
+
+
+# ---------------------------------------------------------------------------
+# Corrección 3.1 — el límite de sesiones
+# ---------------------------------------------------------------------------
+
+
+def _guion_sin_subir_nunca():
+    """Cada sesión abre, pierde la respuesta y el proveedor dice «0 bytes».
+
+    Es el único camino que autoriza abrir otra sesión, así que repetirlo fuerza
+    el límite sin pasar nunca por ``UNKNOWN``.
+    """
+    ciclo = []
+    for _ in range(MAX_SESIONES + 2):
+        ciclo.append(sesion_abierta())
+        ciclo.append(respuesta_perdida(final=False, bytes_enviados=0))
+        ciclo.append(incompleto(0))
+    return ciclo
+
+
+def test_no_se_abre_una_cuarta_sesion(tmp_path):
+    salida, transporte = _publicar(tmp_path, _guion_sin_subir_nunca())
+    assert transporte.sesiones_iniciadas == MAX_SESIONES == 3
+    assert transporte.sesiones_iniciadas < MAX_SESIONES + 1
+
+
+def test_agotado_el_limite_el_desenlace_es_fallido_no_una_subida_mas(tmp_path):
+    """Consta que no quedó contenido, así que es un fallo limpio."""
+    salida, transporte = _publicar(tmp_path, _guion_sin_subir_nunca())
+    assert salida.job.state is EstadoPublicacion.fallido
+    assert str(MAX_SESIONES) in (salida.job.reason or "")
+    assert salida.result is not None
+    assert salida.result.status is EstadoPublicacion.fallido
+    assert salida.result.video_id is None
+
+
+def test_tras_el_limite_no_se_envia_ni_un_fragmento_mas(tmp_path):
+    salida, transporte = _publicar(tmp_path, _guion_sin_subir_nunca())
+    # Un fragmento por sesión, y ninguno después de agotarlas.
+    assert transporte.fragmentos_enviados == MAX_SESIONES
+    ultima_apertura = max(
+        i for i, ll in enumerate(transporte.llamadas)
+        if ll.metodo == "POST"
+    )
+    posteriores = [
+        ll for ll in transporte.llamadas[ultima_apertura + 1:]
+        if ll.metodo == "POST"
+    ]
+    assert posteriores == [], "se abrió una sesión después del límite"
+
+
+def test_el_limite_con_desenlace_incierto_va_a_revision(tmp_path):
+    """Si además la última no se puede determinar, lo mira una persona."""
+    guion = []
+    for _ in range(MAX_SESIONES - 1):
+        guion += [sesion_abierta(), respuesta_perdida(final=False, bytes_enviados=0), incompleto(0)]
+    guion += [sesion_abierta(), respuesta_perdida(final=True, bytes_enviados=0), error(410)]
+    salida, transporte = _publicar(tmp_path, guion)
+    assert salida.job.state is EstadoPublicacion.revision_pendiente
+    assert transporte.sesiones_iniciadas == MAX_SESIONES
+
+
+# ---------------------------------------------------------------------------
+# Corrección 3.2 — PublishJob.attempt frente a UploadSession.attempt
+# ---------------------------------------------------------------------------
+
+
+def test_la_primera_sesion_deja_el_intento_del_trabajo_en_uno(tmp_path):
+    salida, _ = _publicar(tmp_path, [sesion_abierta(), completado(), video_remoto()])
+    assert salida.job.attempt == 1
+    assert salida.result is not None
+    assert salida.result.upload_attempts == 1
+
+
+def test_una_segunda_sesion_legitima_no_incrementa_el_intento_del_trabajo(tmp_path):
+    """Abrir otra sesión dentro del mismo intento lógico no es otro intento."""
+    salida, transporte = _publicar(
+        tmp_path,
+        [
+            sesion_abierta(),
+            respuesta_perdida(final=False, bytes_enviados=0),
+            incompleto(0),        # CONFIRMED_NOT_UPLOADED: se permite otra
+            sesion_abierta(),
+            completado(),
+            video_remoto(),
+        ],
+    )
+    assert transporte.sesiones_iniciadas == 2, "no llegó a abrirse la segunda"
+    assert salida.job.attempt == 1, "el trabajo contó dos intentos"
+    assert salida.result is not None
+    assert salida.result.upload_attempts == 1
+
+
+def test_la_segunda_sesion_se_numera_como_la_segunda(tmp_path, monkeypatch):
+    """``UploadSession.attempt`` sí avanza: cuenta sesiones, no intentos."""
+    from app.adapters.youtube import publisher as modulo
+
+    vistos: list[int] = []
+    original = modulo.iniciar_sesion
+
+    def _espia(*args, **kwargs):
+        vistos.append(kwargs["attempt"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(modulo, "iniciar_sesion", _espia)
+    _publicar(
+        tmp_path,
+        [
+            sesion_abierta(),
+            respuesta_perdida(final=False, bytes_enviados=0),
+            incompleto(0),
+            sesion_abierta(),
+            completado(),
+            video_remoto(),
+        ],
+    )
+    assert vistos == [1, 2], f"la numeración de sesiones fue {vistos}"
+
+
+# ---------------------------------------------------------------------------
+# Corrección 3.3 — PublishResult nunca es un estado intermedio
+# ---------------------------------------------------------------------------
+
+
+#: Los desenlaces que ``publicar`` puede producir de verdad, cada uno con el
+#: guion que lo provoca. Si aparece uno nuevo, este mapa deja de ser exhaustivo
+#: y el test de abajo lo dirá.
+DESENLACES_REALES = {
+    "completado": [sesion_abierta(), completado(), video_remoto()],
+    "verificacion_discrepante": [
+        sesion_abierta(), completado(), video_remoto(title="Otro"),
+    ],
+    "verificacion_imposible": [sesion_abierta(), completado(), error(503)],
+    "incertidumbre": [sesion_abierta(), respuesta_perdida(final=True), error(410)],
+    "autorizacion": [error(401)],
+    "permanente": [error(400)],
+    "transitorio_agotado": [error(503)],
+}
+
+
+@pytest.mark.parametrize("nombre", sorted(DESENLACES_REALES))
+def test_publish_result_nunca_sale_en_uploaded_ni_verifying(tmp_path, nombre):
+    """Los estados siguen en el contrato de G7.0; el publisher no los emite."""
+    salida, _ = _publicar(tmp_path, DESENLACES_REALES[nombre])
+    if salida.result is None:
+        return
+    assert salida.result.status not in (
+        EstadoPublicacion.subido,
+        EstadoPublicacion.verificando,
+    ), f"{nombre} devolvió un estado intermedio"
+    assert salida.result.status in (
+        EstadoPublicacion.completado,
+        EstadoPublicacion.fallido,
+        EstadoPublicacion.revision_pendiente,
+    )
+
+
+def test_el_contrato_de_g70_sigue_admitiendo_los_estados_intermedios():
+    """No se estrecharon: solo se demuestra que el publisher no los usa."""
+    from app.contracts.models import ESTADOS_DE_RESULTADO
+
+    assert EstadoPublicacion.subido in ESTADOS_DE_RESULTADO
+    assert EstadoPublicacion.verificando in ESTADOS_DE_RESULTADO
+
+
+def test_el_trabajo_si_atraviesa_los_estados_intermedios(tmp_path):
+    """La distinción importa: el job pasa por ellos, el result no los refleja."""
+    salida, _ = _publicar(tmp_path, [sesion_abierta(), completado(), video_remoto()])
+    # Para llegar a COMPLETED hubo que pasar por UPLOADED y VERIFYING, y la
+    # tabla de transiciones es la que lo garantiza.
+    from app.contracts.models import TRANSICIONES_PUBLICACION as T
+
+    assert EstadoPublicacion.completado in T[EstadoPublicacion.verificando]
+    assert EstadoPublicacion.verificando in T[EstadoPublicacion.subido]
+    assert salida.job.state is EstadoPublicacion.completado

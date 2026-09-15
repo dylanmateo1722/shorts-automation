@@ -77,11 +77,14 @@ def formatear_progreso(confirmados: int, total: int) -> str:
 
 
 def leer_progreso(observed_state: str) -> int | None:
-    """Los bytes confirmados que anunciaba un ``observed_state``, si los trae.
+    """Los bytes que anunciaba un ``observed_state``, si el texto los trae.
 
-    Devuelve ``None`` cuando el texto no es un progreso, en vez de adivinar: un
-    número inventado aquí haría que el publisher reanudara desde el offset
-    equivocado.
+    **Solo para representación.** Ninguna decisión de reanudación pasa por aquí:
+    el offset con el que se continúa una sesión es
+    ``ReconciliationResult.bytes_confirmed``, que es un entero del contrato.
+    Recuperar un offset de un texto libre era exactamente el acoplamiento que
+    esta separación elimina, así que esta función existe para leer y comparar
+    lo que se muestra, no para decidir por dónde sigue una subida.
     """
     cabeza, separador, _ = observed_state.partition("/")
     if not separador:
@@ -101,12 +104,14 @@ def _resultado(
     evidencia: list[str],
     *,
     video_id: str | None = None,
+    bytes_confirmed: int | None = None,
 ) -> ReconciliationResult:
     return ReconciliationResult(
         run_id=peticion.run_id,
         attempt=peticion.attempt,
         outcome=desenlace,
         video_id=video_id,
+        bytes_confirmed=bytes_confirmed,
         observed_state=observado,
         confidence=confianza,
         evidence=evidencia,
@@ -132,7 +137,8 @@ def reconciliar(
     * ``UNKNOWN`` — todo lo demás. Obliga a revisión humana.
     """
     # --- Caso 1: no hay con qué preguntar -----------------------------------
-    if not peticion.sesion_consultable:
+    sesion = peticion.upload_session
+    if sesion is None:
         # Sin bytes enviados no puede haber vídeo: el proveedor no recibió
         # contenido que pudiera crear uno. Es el único caso en que la ausencia
         # de sesión permite afirmar algo.
@@ -165,8 +171,6 @@ def reconciliar(
         )
 
     # --- Caso 2: hay sesión; se pregunta ------------------------------------
-    sesion = peticion.upload_session
-    assert sesion is not None  # lo garantiza sesion_consultable
     try:
         estado = consultar_progreso(sesion, transporte=transporte, timeout_s=timeout_s)
     except SesionDesconocida as exc:
@@ -239,4 +243,5 @@ def reconciliar(
             "el proveedor informa progreso parcial sobre una sesión viva; se "
             "puede continuar esa misma sesión",
         ],
+        bytes_confirmed=estado.bytes_confirmed,
     )

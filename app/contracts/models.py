@@ -1631,7 +1631,16 @@ class ReconciliationResult(Artefacto):
     attempt: int = Field(ge=1)
     outcome: DesenlaceReconciliacion
     video_id: str | None = None
-    #: Qué dijo el proveedor, en texto corto y saneado.
+    #: Bytes que el proveedor dio por recibidos. Es **el** dato con el que se
+    #: reanuda una sesión, y por eso es un entero del contrato y no un número
+    #: que alguien tenga que sacar de un texto: un offset equivocado reenvía
+    #: contenido o deja un hueco, y las dos cosas rompen la subida.
+    #:
+    #: Obligatorio en ``UPLOAD_IN_PROGRESS``, que es el único desenlace desde el
+    #: que se continúa. En los demás no significa nada y se rechaza.
+    bytes_confirmed: int | None = Field(default=None, ge=0)
+    #: Qué dijo el proveedor, en texto corto y saneado. Es **descriptivo**: sirve
+    #: para que una persona lea qué pasó, y ninguna decisión depende de él.
     observed_state: str = ""
     confidence: ConfianzaReconciliacion
     checked_at: datetime = Field(default_factory=_ahora)
@@ -1666,13 +1675,23 @@ class ReconciliationResult(Artefacto):
                     "evidencia, el desenlace no sería desconocido"
                 )
 
-        if (
-            self.outcome is DesenlaceReconciliacion.subida_en_curso
-            and self.confidence is ConfianzaReconciliacion.sin_evidencia
-        ):
+        if self.outcome is DesenlaceReconciliacion.subida_en_curso:
+            if self.confidence is ConfianzaReconciliacion.sin_evidencia:
+                raise ValueError(
+                    "'UPLOAD_IN_PROGRESS' sin evidencia no es observable: saber "
+                    "que una subida va por la mitad exige que el proveedor lo "
+                    "haya dicho"
+                )
+            if self.bytes_confirmed is None:
+                raise ValueError(
+                    "'UPLOAD_IN_PROGRESS' exige bytes_confirmed: es el offset "
+                    "desde el que se reanuda, y sin él no habría por dónde "
+                    "seguir"
+                )
+        elif self.bytes_confirmed is not None:
             raise ValueError(
-                "'UPLOAD_IN_PROGRESS' sin evidencia no es observable: saber que "
-                "una subida va por la mitad exige que el proveedor lo haya dicho"
+                f"hay bytes_confirmed con desenlace {self.outcome.value!r}: solo "
+                f"'UPLOAD_IN_PROGRESS' describe una subida que continúa"
             )
         return self
 

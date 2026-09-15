@@ -310,6 +310,9 @@ def test_solo_confirmado_no_subido_autoriza_una_sesion_nueva():
             attempt=1,
             outcome=desenlace,
             video_id=VIDEO_ID if desenlace is DesenlaceReconciliacion.confirmado_subido else None,
+            bytes_confirmed=(
+                128 if desenlace is DesenlaceReconciliacion.subida_en_curso else None
+            ),
             confidence=confianza,
         )
         assert not resultado.permite_nueva_sesion, desenlace
@@ -373,3 +376,96 @@ def test_el_progreso_anunciado_es_el_que_el_proveedor_informo():
         transporte=TransporteFalso(guion=[incompleto(MULTIPLO_FRAGMENTO * 2)]),
     )
     assert leer_progreso(resultado.observed_state) == MULTIPLO_FRAGMENTO * 2
+
+
+# ---------------------------------------------------------------------------
+# bytes_confirmed es del contrato, no del texto (corrección 1)
+# ---------------------------------------------------------------------------
+
+
+def test_upload_in_progress_trae_los_bytes_como_entero():
+    run_id = uuid4()
+    resultado = reconciliar(
+        _peticion(
+            run_id=run_id,
+            sesion=_sesion(run_id, MULTIPLO_FRAGMENTO),
+            last_known_bytes=MULTIPLO_FRAGMENTO,
+        ),
+        transporte=TransporteFalso(guion=[incompleto(MULTIPLO_FRAGMENTO * 2)]),
+    )
+    assert resultado.bytes_confirmed == MULTIPLO_FRAGMENTO * 2
+    assert isinstance(resultado.bytes_confirmed, int)
+
+
+def test_upload_in_progress_sin_bytes_no_valida():
+    """Sin offset no hay por dónde reanudar, así que el estado no es construible."""
+    with pytest.raises(ValueError, match="exige bytes_confirmed"):
+        ReconciliationResult(
+            run_id=uuid4(),
+            attempt=1,
+            outcome=DesenlaceReconciliacion.subida_en_curso,
+            confidence=ConfianzaReconciliacion.provider_parcial,
+        )
+
+
+@pytest.mark.parametrize(
+    "desenlace, confianza, video_id",
+    [
+        (DesenlaceReconciliacion.desconocido, ConfianzaReconciliacion.sin_evidencia, None),
+        (
+            DesenlaceReconciliacion.confirmado_no_subido,
+            ConfianzaReconciliacion.provider_confirmado,
+            None,
+        ),
+        (
+            DesenlaceReconciliacion.confirmado_subido,
+            ConfianzaReconciliacion.provider_confirmado,
+            VIDEO_ID,
+        ),
+    ],
+)
+def test_los_demas_desenlaces_rechazan_bytes_confirmed(desenlace, confianza, video_id):
+    """Fuera de una subida en curso, un offset no significaría nada."""
+    with pytest.raises(ValueError, match="hay bytes_confirmed"):
+        ReconciliationResult(
+            run_id=uuid4(),
+            attempt=1,
+            outcome=desenlace,
+            video_id=video_id,
+            bytes_confirmed=128,
+            confidence=confianza,
+        )
+
+
+def test_sincronizar_ignora_un_observed_state_manipulado():
+    """El offset sale del contrato; el texto es decorativo y puede mentir."""
+    from app.adapters.youtube.publisher import _sincronizar
+
+    run_id = uuid4()
+    sesion = _sesion(run_id, MULTIPLO_FRAGMENTO)
+    resultado = ReconciliationResult(
+        run_id=run_id,
+        attempt=1,
+        outcome=DesenlaceReconciliacion.subida_en_curso,
+        bytes_confirmed=MULTIPLO_FRAGMENTO * 2,
+        # Texto manipulado: anuncia un offset distinto del real.
+        observed_state="999999/123 bytes recibidos",
+        confidence=ConfianzaReconciliacion.provider_parcial,
+    )
+    sincronizada = _sincronizar(sesion, resultado)
+    assert sincronizada.bytes_confirmed == MULTIPLO_FRAGMENTO * 2
+    assert sincronizada.bytes_confirmed != 999999
+
+
+def test_publisher_no_importa_leer_progreso():
+    """La función existe solo para representación; el publisher no la usa."""
+    import inspect
+
+    from app.adapters.youtube import publisher
+
+    fuente = inspect.getsource(publisher)
+    assert "leer_progreso" not in fuente
+    # Y ningún parseo manual sobre el texto descriptivo.
+    cuerpo = inspect.getsource(publisher._sincronizar)
+    for sospechoso in (".split(", ".partition(", "int(", "re."):
+        assert sospechoso not in cuerpo, sospechoso

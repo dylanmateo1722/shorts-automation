@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 from uuid import UUID
 
 from app.contracts.models import (
@@ -60,12 +60,13 @@ from app.contracts.models import (
     publication_fingerprint,
 )
 from app.core.errors import (
+    EntradaInvalida,
     ErrorPermanente,
     ErrorPipeline,
     ErrorTransitorio,
 )
 from app.adapters.youtube.auth import AutorizacionInvalida, TokenAcceso
-from app.adapters.youtube.reconciliation import leer_progreso, reconciliar
+from app.adapters.youtube.reconciliation import reconciliar
 from app.adapters.youtube.upload import (
     TAMANO_FRAGMENTO_BYTES,
     TIMEOUT_POR_DEFECTO_S,
@@ -80,6 +81,8 @@ from app.adapters.youtube.upload import (
     url_publica,
 )
 from app.pipeline.publicacion import ResultadoGate, sha256_de_archivo
+
+_T = TypeVar("_T")
 
 #: Intentos máximos ante un fallo transitorio. Tres, como el resto del proyecto.
 MAX_INTENTOS = 3
@@ -144,12 +147,12 @@ def _espera(intento: int, aleatorio: Callable[[], float]) -> float:
 
 
 def _con_reintentos(
-    accion: Callable[[], object],
+    accion: Callable[[], _T],
     *,
     dormir: Callable[[float], None],
     aleatorio: Callable[[], float],
     max_intentos: int = MAX_INTENTOS,
-) -> object:
+) -> _T:
     """Ejecuta una acción reintentando solo lo que merece reintentarse.
 
     Se reintenta lo transitorio: timeouts, 429 y 5xx. **No** se reintenta
@@ -157,19 +160,18 @@ def _con_reintentos(
     petición cuya respuesta se perdió es exactamente cómo se crea un duplicado.
     Esa excepción sube intacta para que la resuelva la reconciliación.
     """
-    ultimo: ErrorPipeline | None = None
     for intento in range(1, max_intentos + 1):
         try:
             return accion()
         except RespuestaPerdida:
             raise
         except ErrorTransitorio as exc:
-            ultimo = exc
             if intento == max_intentos:
-                break
+                raise
             dormir(_espera(intento, aleatorio))
-    assert ultimo is not None  # pragma: no cover - el bucle siempre lo asigna
-    raise ultimo
+    raise ErrorPipeline(  # pragma: no cover - max_intentos siempre es >= 1
+        "la política de reintentos terminó sin ejecutar ninguna acción"
+    )
 
 
 def _motivo_desde(exc: Exception) -> MotivoReconciliacion:
@@ -320,7 +322,15 @@ def publicar(
             else trabajo,
         )
 
-    assert gate.video_path is not None and gate.video_sha256 is not None
+    # ``ResultadoGate`` ya rechaza en su construcción un ``listo=True`` sin
+    # vídeo, pero la comprobación se repite aquí y con un error del dominio, no
+    # con un ``assert``: los asserts desaparecen bajo ``python -O`` y esta es la
+    # última puerta antes de hablar con YouTube.
+    if gate.video_path is None or not (gate.video_sha256 or "").strip():
+        raise EntradaInvalida(
+            "el gate dice que se puede publicar pero no trae el vídeo ni su "
+            "huella; no se contacta con el proveedor sin ambas cosas"
+        )
 
     if trabajo.state is EstadoPublicacion.no_listo:
         trabajo = trabajo.transicionar(EstadoPublicacion.listo)
@@ -432,7 +442,14 @@ def publicar(
 
         if ultima_reconciliacion.outcome is DesenlaceReconciliacion.subida_en_curso:
             # Continuar la MISMA sesión. No se abre otra.
-            assert sesion is not None
+            if sesion is None:
+                # No es representable —``UPLOAD_IN_PROGRESS`` solo sale de haber
+                # consultado una sesión—, pero si llegara a ocurrir, abrir otra
+                # sería justo lo prohibido. Se manda a revisión.
+                raise ErrorPermanente(
+                    "el proveedor informa una subida en curso y no consta la "
+                    "sesión con la que continuarla"
+                )
             sesion = _sincronizar(sesion, ultima_reconciliacion)
             continue
 
@@ -563,11 +580,18 @@ def _con_reconciliacion(
 def _sincronizar(
     sesion: UploadSession, resultado: ReconciliationResult
 ) -> UploadSession:
-    """Pone la sesión al día con los bytes que el proveedor dio por recibidos."""
-    anunciados = leer_progreso(resultado.observed_state)
-    # Si el texto no anunciaba progreso, se conserva lo que la sesión ya daba por
-    # confirmado: retroceder el offset reenviaría bytes y adelantarlo dejaría un
-    # hueco, y las dos cosas rompen la subida.
+    """Pone la sesión al día con los bytes que el proveedor dio por recibidos.
+
+    El offset sale de ``resultado.bytes_confirmed``, que es un entero del
+    contrato y viene garantizado en ``UPLOAD_IN_PROGRESS`` —el único desenlace
+    que llega hasta aquí—. ``observed_state`` no se mira: es texto descriptivo, y
+    sacar de él un número que decide desde dónde se reanuda sería reintroducir
+    el acoplamiento que el contrato eliminó.
+    """
+    anunciados = resultado.bytes_confirmed
+    # La defensa se mantiene por si el desenlace cambiara de forma: conservar lo
+    # que la sesión ya daba por confirmado es lo único seguro, porque retroceder
+    # el offset reenviaría bytes y adelantarlo dejaría un hueco.
     confirmados = sesion.bytes_confirmed if anunciados is None else anunciados
     datos = sesion.model_dump()
     datos["session_url"] = sesion.session_url
@@ -601,7 +625,10 @@ def _subir(
     una nueva cuando viene vacío, y eso únicamente ocurre tras un
     ``CONFIRMED_NOT_UPLOADED``.
     """
-    assert gate.video_path is not None and gate.video_sha256 is not None
+    if gate.video_path is None or not (gate.video_sha256 or "").strip():
+        raise EntradaInvalida(
+            "no se sube un gate sin vídeo ni huella"
+        )
     ruta: Path = gate.video_path
 
     if progreso.sesion is None:
@@ -619,7 +646,6 @@ def _subir(
             dormir=dormir,
             aleatorio=aleatorio,
         )
-        assert isinstance(sesion, UploadSession)
         progreso.registrar(sesion)
     else:
         # Reanudar exige comprobar que el archivo sigue siendo el mismo.
@@ -628,8 +654,7 @@ def _subir(
     with ruta.open("rb") as archivo:
         while True:
             sesion = progreso.sesion
-            assert sesion is not None
-            if sesion.bytes_confirmed >= sesion.total_bytes:
+            if sesion is None or sesion.bytes_confirmed >= sesion.total_bytes:
                 break
             offset = sesion.bytes_confirmed
             archivo.seek(offset)
@@ -650,14 +675,15 @@ def _subir(
                 dormir=dormir,
                 aleatorio=aleatorio,
             )
-            nueva, estado = resultado  # type: ignore[misc]
+            nueva, estado = resultado
             progreso.registrar(nueva)
             if estado.confirmado:
                 return estado.video_id or ""
 
     # Todos los bytes enviados y sin identificador: se pregunta explícitamente.
     sesion = progreso.sesion
-    assert sesion is not None
+    if sesion is None:  # pragma: no cover - el bloque anterior siempre la deja
+        raise ErrorPermanente("la subida terminó sin dejar constancia de la sesión")
     estado = consultar_progreso(sesion, transporte=transporte, timeout_s=timeout_s)
     if estado.confirmado:
         return estado.video_id or ""

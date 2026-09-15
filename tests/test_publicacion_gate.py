@@ -12,6 +12,8 @@ import hashlib
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from app.contracts.models import (
     BaseLicencia,
     ClaseFuente,
@@ -352,3 +354,102 @@ def test_se_informan_todas_las_causas_no_solo_la_primera(tmp_path):
     )
     assert not gate.listo
     assert len(gate.motivos) >= 3
+
+
+# ---------------------------------------------------------------------------
+# El gate no puede mentir, y no lo protege un assert (corrección 2)
+# ---------------------------------------------------------------------------
+
+
+def test_un_gate_listo_sin_video_no_es_construible():
+    from app.core.errors import EntradaInvalida
+    from app.pipeline.publicacion import ResultadoGate
+
+    with pytest.raises(EntradaInvalida, match="ruta del vídeo"):
+        ResultadoGate(listo=True, video_sha256="a" * 64, total_bytes=10)
+
+
+def test_un_gate_listo_sin_huella_no_es_construible(tmp_path):
+    from app.core.errors import EntradaInvalida
+    from app.pipeline.publicacion import ResultadoGate
+
+    destino = tmp_path / "v.mp4"
+    destino.write_bytes(b"x")
+    with pytest.raises(EntradaInvalida, match="SHA-256"):
+        ResultadoGate(listo=True, video_path=destino, total_bytes=1)
+
+
+def test_un_gate_listo_con_tamano_cero_no_es_construible(tmp_path):
+    from app.core.errors import EntradaInvalida
+    from app.pipeline.publicacion import ResultadoGate
+
+    destino = tmp_path / "v.mp4"
+    destino.write_bytes(b"x")
+    with pytest.raises(EntradaInvalida, match="bytes"):
+        ResultadoGate(
+            listo=True, video_path=destino, video_sha256="a" * 64, total_bytes=0
+        )
+
+
+def test_un_gate_no_listo_sin_motivos_no_es_construible():
+    from app.core.errors import EntradaInvalida
+    from app.pipeline.publicacion import ResultadoGate
+
+    with pytest.raises(EntradaInvalida, match="por qué"):
+        ResultadoGate(listo=False)
+
+
+def test_un_gate_listo_con_motivos_no_es_construible(tmp_path):
+    from app.core.errors import EntradaInvalida
+    from app.pipeline.publicacion import ResultadoGate
+
+    destino = tmp_path / "v.mp4"
+    destino.write_bytes(b"x")
+    with pytest.raises(EntradaInvalida, match="motivos de rechazo"):
+        ResultadoGate(
+            listo=True,
+            motivos=["la QA falló"],
+            video_path=destino,
+            video_sha256="a" * 64,
+            total_bytes=1,
+        )
+
+
+def test_el_publisher_rechaza_un_gate_malformado_sin_tocar_la_red():
+    """Aunque alguien esquive el constructor, no se habla con YouTube."""
+    from app.core.errors import EntradaInvalida, ErrorPermanente
+    from app.pipeline.publicacion import ResultadoGate
+
+    run_id = uuid4()
+    valido = ResultadoGate(
+        listo=True, video_path=Path("/tmp/no-existe.mp4"),
+        video_sha256="a" * 64, total_bytes=10,
+    )
+    # `object.__setattr__` salta el validador: es la única forma de fabricar el
+    # estado imposible, y sirve para comprobar la última puerta del publisher.
+    object.__setattr__(valido, "video_path", None)
+
+    transporte = TransporteFalso()
+    with pytest.raises(EntradaInvalida) as capturado:
+        publicar(
+            run_id=run_id,
+            metadata=metadata(run_id),
+            gate=valido,
+            token=token(),
+            transporte=transporte,
+        )
+    assert isinstance(capturado.value, ErrorPermanente), "el error no es del dominio"
+    assert transporte.llamadas == [], "se contactó con el proveedor"
+
+
+def test_ningun_assert_protege_el_gate():
+    """Los asserts desaparecen bajo ``python -O``; estas puertas no pueden."""
+    import inspect
+
+    from app.adapters.youtube import publisher
+    from app.pipeline import publicacion
+
+    for modulo in (publisher, publicacion):
+        for linea in inspect.getsource(modulo).splitlines():
+            despojada = linea.strip()
+            assert not despojada.startswith("assert "), f"{modulo.__name__}: {linea}"

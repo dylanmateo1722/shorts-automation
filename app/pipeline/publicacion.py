@@ -32,6 +32,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.core.errors import EntradaInvalida
 from app.contracts.models import (
     EstadoQA,
     EstadoRender,
@@ -68,6 +69,44 @@ class ResultadoGate:
     video_path: Path | None = None
     video_sha256: str | None = None
     total_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        """Rechaza los gates que afirman lo que no pueden respaldar.
+
+        Un ``listo=True`` sin vídeo, sin huella o sin tamaño es un estado
+        imposible: dice «se puede publicar» y no trae con qué. Se valida en la
+        construcción, así que un gate inválido **no llega a existir** y el
+        publisher no tiene que defenderse de él con una comprobación que las
+        optimizaciones de Python puedan borrar.
+
+        Un ``listo=False`` sin motivos es el mismo error por el otro lado: diría
+        que no se puede publicar sin decir por qué.
+        """
+        if self.listo:
+            if self.motivos:
+                raise EntradaInvalida(
+                    "un gate satisfecho no puede traer motivos de rechazo: "
+                    f"{'; '.join(self.motivos)}"
+                )
+            if self.video_path is None:
+                raise EntradaInvalida(
+                    "el gate declara que se puede publicar y no trae la ruta del "
+                    "vídeo"
+                )
+            if not (self.video_sha256 or "").strip():
+                raise EntradaInvalida(
+                    "el gate declara que se puede publicar y no trae el SHA-256 "
+                    "del vídeo: sin él no hay integridad que comprobar"
+                )
+            if self.total_bytes <= 0:
+                raise EntradaInvalida(
+                    f"el gate declara que se puede publicar y el vídeo mide "
+                    f"{self.total_bytes} bytes"
+                )
+        elif not self.motivos:
+            raise EntradaInvalida(
+                "un gate no satisfecho tiene que decir por qué no lo está"
+            )
 
     @property
     def resumen(self) -> str:
