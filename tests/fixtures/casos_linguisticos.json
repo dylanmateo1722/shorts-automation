@@ -1,0 +1,32 @@
+{
+  "factual": {
+    "descripcion": "afirmación factual simple",
+    "en": "The library opened on a rainy Tuesday and the whole town showed up.",
+    "es": "La biblioteca abrió un martes lluvioso y apareció el pueblo entero."
+  },
+  "numeros": {
+    "descripcion": "cifras que deben sobrevivir intactas",
+    "en": "The route is 42 kilometres long and climbs 1350 metres in 3 stages.",
+    "es": "La ruta tiene 42 kilómetros y sube 1350 metros en 3 etapas."
+  },
+  "nombres": {
+    "descripcion": "nombres propios que deben conservarse",
+    "en": "Mariana Duarte and Kepler Labs signed the agreement in Lisbon.",
+    "es": "Mariana Duarte y Kepler Labs firmaron el acuerdo en Lisboa."
+  },
+  "pregunta": {
+    "descripcion": "pregunta que exige signos de apertura y cierre en español",
+    "en": "So what happens when the power finally goes out?",
+    "es": "¿Y qué pasa cuando por fin se va la luz?"
+  },
+  "idiomatica": {
+    "descripcion": "expresión idiomática que no admite traducción literal",
+    "en": "They decided to bite the bullet and rebuild the whole thing.",
+    "es": "Decidieron hacer de tripas corazón y rehacerlo todo."
+  },
+  "incertidumbre": {
+    "descripcion": "conjetura que no puede convertirse en afirmación",
+    "en": "The effect may fade over time, though nobody has measured it yet.",
+    "es": "El efecto puede desvanecerse con el tiempo, aunque nadie lo ha medido todavía."
+  }
+}

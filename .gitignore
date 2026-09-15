@@ -1,0 +1,24 @@
+# Entornos
+.venv/
+__pycache__/
+*.py[cod]
+
+# Configuración generada en tiempo de ejecución — nunca se versiona (D2)
+.env
+config.toml
+vendor/moneyprinterturbo/config.toml
+.youtube_refresh_token
+
+# Artefactos de corrida
+runs/
+evidence/*.json
+!evidence/.gitkeep
+
+# Almacenamiento del motor
+vendor/moneyprinterturbo/storage/
+vendor/moneyprinterturbo/models/
+
+# Pruebas
+.pytest_cache/
+tests/motor_falso/storage/
+tests/motor_falso/ultima_invocacion.json

@@ -1,0 +1,89 @@
+# Gate 0.5 — Proof of Concept.
+#
+# Comprueba la Hipótesis B: que el pipeline de render puede ejecutarse
+# realmente en el runner previsto.
+#
+# Este workflow NO usa ningún secreto: Edge TTS no requiere API key y el
+# material visual se genera localmente con FFmpeg. El repositorio es público,
+# así que sus logs también lo son: no se usa `set -x` ni se vuelca el entorno.
+name: PoC Gate 0.5
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/gate-0-5-poc]
+
+permissions:
+  contents: read
+
+jobs:
+  poc:
+    name: TTS -> SRT -> MPT -> burn-in -> QA
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout con submódulo de MoneyPrinterTurbo
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Registrar el commit fijado del motor
+        run: git -C vendor/moneyprinterturbo rev-parse HEAD
+
+      - name: Instalar fuentes para libass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-dejavu-core
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Entorno del PoC
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt
+
+      - name: Entorno del motor MoneyPrinterTurbo
+        run: ./scripts/setup_mpt.sh
+
+      - name: Pruebas del segmentador (sin red)
+        run: .venv/bin/python -m pytest tests/ -q
+
+      - name: Ejecutar el PoC de extremo a extremo
+        env:
+          # MoneyPrinterTurbo exige que --task-id sea un UUID, y nuestro run_id
+          # es ese mismo valor (contrato D12). Se deriva uno determinista de la
+          # corrida de CI para que el artefacto siga siendo trazable.
+          CI_RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import os,uuid;print(uuid.uuid5(uuid.NAMESPACE_URL, os.environ['CI_RUN_KEY']))")
+          echo "run_id de la corrida: $RUN_ID"
+          .venv/bin/python -m poc.run_poc --out-dir runs/poc --run-id "$RUN_ID"
+
+      - name: Espacio en disco tras la corrida
+        if: always()
+        run: df -h / | tail -1
+
+      - name: Publicar artefactos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poc-gate-0-5
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runs/poc/final.mp4
+            runs/poc/narracion.mp3
+            runs/poc/subtitulos.srt
+            runs/poc/subtitulos.ass
+            runs/poc/wordboundaries.json
+            evidence/*.json

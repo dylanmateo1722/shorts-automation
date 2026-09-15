@@ -1,0 +1,863 @@
+# Integración continua del orquestador.
+#
+# Tres trabajos con propósitos distintos:
+#
+#   tests        rápido y sin servicios externos: motor falso que respeta el
+#                contrato del CLI de MoneyPrinterTurbo, LLM falso y TTS falso.
+#                Es el que decide si el código está bien, y el que demuestra
+#                desde un checkout limpio que la cadena entera funciona y que un
+#                recurso de referencia queda bloqueado para el render.
+#   integration  lento y con el motor real: produce un Short de verdad desde un
+#                checkout limpio. MoneyPrinterTurbo y FFmpeg son los auténticos
+#                —sustituirlos por falsos no probaría que sale un MP4—, y solo
+#                el LLM y el TTS son falsos, porque exigirían credenciales sin
+#                aportar nada a lo que aquí se comprueba.
+#   tts-real     aislado y contra el Edge TTS real. Está separado a propósito:
+#                así una caída del servicio externo no tumba la señal del
+#                código, y tampoco se disfraza de PASS. Si sale en rojo con
+#                `tests` en verde, es que Edge TTS no estaba disponible.
+#
+# No usa ningún secreto: ni el LLM falso, ni el TTS falso, ni Edge TTS (que no
+# requiere credencial). El repositorio es público y sus logs también, así que no
+# se emplea `set -x` ni se vuelca el entorno.
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/gate-1-core
+      - claude/gate-2-linguistic
+      - claude/gate-3-tts-subtitles
+      - claude/gate-4-transformation-qa
+      - claude/gate-5-e2e-render
+      - claude/gate-6-sources-provenance
+      - claude/gate-7-youtube-publishing
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests del núcleo
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt
+
+      - name: Suite de tests
+        run: .venv/bin/python -m pytest
+
+      # El pipeline lingüístico se ejercita de punta a punta con el proveedor
+      # falso: sin credenciales, sin red y sin coste. Una llamada real a un
+      # modelo en cada push sería cara y no probaría nada más.
+      - name: Pipeline lingüístico con proveedor falso
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          .venv/bin/python -m app run \
+            --pipeline linguistic \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --run-id "$RUN_ID"
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline linguistic
+          .venv/bin/python -m app run --pipeline linguistic \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/reanudacion.log
+          grep -q "stage=translation event=skip" /tmp/reanudacion.log
+          grep -q "stage=adaptation event=skip" /tmp/reanudacion.log
+
+      # La cadena de voz completa con TTS falso: genera audio real con FFmpeg,
+      # mide su duración, alinea contra el guion y escribe SRT y ASS. No sale a
+      # la red y no gasta ninguna llamada a un servicio externo.
+      - name: Pipeline de voz con proveedor falso
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          .venv/bin/python -m app run \
+            --pipeline voice \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --run-id "$RUN_ID"
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline voice
+
+          # Los tres artefactos lógicos y sus archivos físicos.
+          test -s "runs/$RUN_ID/voice_asset.json"
+          test -s "runs/$RUN_ID/word_boundaries.json"
+          test -s "runs/$RUN_ID/subtitle_asset.json"
+          test -s "runs/$RUN_ID/voice/narration.mp3"
+          test -s "runs/$RUN_ID/subtitles/subtitles.srt"
+          test -s "runs/$RUN_ID/subtitles/subtitles.ass"
+
+          # Reanudar no debe volver a sintetizar.
+          .venv/bin/python -m app run --pipeline voice \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/reanudacion-voz.log
+          grep -q "stage=voice event=skip" /tmp/reanudacion-voz.log
+          grep -q "stage=subtitles event=skip" /tmp/reanudacion-voz.log
+
+      # Transformación editorial y QA técnica. Comprueba lo que ninguna prueba
+      # unitaria puede comprobar: que desde un checkout limpio la cadena entera
+      # produce artefactos coherentes y que un recurso declarado solo como
+      # referencia queda bloqueado para el render de verdad.
+      - name: Transformación y QA técnica
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+
+          # Un recurso consultado solo como referencia, dentro de la corrida.
+          mkdir -p "runs/$RUN_ID/reference"
+          echo "material consultado como referencia" > "runs/$RUN_ID/reference/fuente.txt"
+
+          .venv/bin/python -m app run \
+            --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g4.log
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline transformation
+
+          # Los cuatro artefactos lógicos y el overlay propio.
+          test -s "runs/$RUN_ID/overlay_spec.json"
+          test -s "runs/$RUN_ID/provenance_ledger.json"
+          test -s "runs/$RUN_ID/transformation_set.json"
+          test -s "runs/$RUN_ID/qa_result.json"
+          test -s "runs/$RUN_ID/overlay/overlay.ass"
+
+          # QA técnica en verde y juicio editorial explícitamente sin evaluar.
+          grep -q "stage=technical_qa event=evaluated" /tmp/g4.log
+          grep -q "editorial_legal=NOT_ASSESSED" /tmp/g4.log
+
+          # El recurso de referencia está registrado y fuera del render.
+          grep -q "stage=provenance event=reference_only asset=reference:0 path=reference/fuente.txt" /tmp/g4.log
+          grep -q "event=recorded .*policy_version=provenance_policy_v1" /tmp/g4.log
+          grep -q "class_render_allowed=4 class_reference_only=1" /tmp/g4.log
+          .venv/bin/python - "$RUN_ID" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          raiz = Path("runs") / sys.argv[1]
+          ledger = json.loads((raiz / "provenance_ledger.json").read_text(encoding="utf-8"))
+          informe = json.loads((raiz / "qa_result.json").read_text(encoding="utf-8"))
+          conjunto = json.loads((raiz / "transformation_set.json").read_text(encoding="utf-8"))
+
+          referencia = "reference/fuente.txt"
+          por_id = {f["asset_id"]: f for f in ledger["sources"]}
+          decisiones = {d["asset_id"]: d for d in ledger["decisions"]}
+          clases = {
+              f["local_path"]: decisiones[f["asset_id"]]["decision"]
+              for f in ledger["sources"]
+              if f.get("local_path") and f["asset_id"] in decisiones
+          }
+          assert clases[referencia] == "reference_only", clases
+          assert referencia not in ledger["render_assets"], ledger["render_assets"]
+          assert all(e["asset_ref"] != referencia for e in conjunto["elements"])
+
+          assert informe["technical_qa_ok"] is True, informe["status"]
+          assert informe["ready_for_render"] is True
+          assert informe["editorial_legal_assessment"]["status"] == "NOT_ASSESSED"
+          assert informe["editorial_legal_assessment"]["automated_similarity_threshold_applied"] is False
+          tipos = {e["kind"] for e in conjunto["elements"]}
+          assert tipos == {
+              "own_narration", "restructured_script", "added_context",
+              "own_subtitles", "visual_overlay",
+          }, tipos
+          print(
+              f"QA {informe['status']}: {len(informe['checks'])} checks, "
+              f"{len(tipos)} elementos, {referencia} bloqueado para el render"
+          )
+          PY
+
+          # Reanudar no debe rehacer nada.
+          .venv/bin/python -m app run --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g4-reanudacion.log
+          for ETAPA in overlay provenance transformation technical_qa; do
+            grep -q "stage=$ETAPA event=skip" /tmp/g4-reanudacion.log
+          done
+
+      - name: Procedencia, evidencia y decisiones de licencia
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          # Fuentes externas declaradas a mano. No hay descubrimiento ni descarga:
+          # alguien declara la fuente y su evidencia, y la política decide.
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          mkdir -p "runs/$RUN_ID/reference" "runs/$RUN_ID/external"
+          echo "consultado como referencia" > "runs/$RUN_ID/reference/fuente.txt"
+          echo "clip de dominio publico" > "runs/$RUN_ID/external/clip.txt"
+
+          cat > /tmp/fuentes.json <<'JSON'
+          {
+            "note": "declaradas a mano para ejercitar la politica; sin credenciales",
+            "sources": [
+              {
+                "basis": "public_domain",
+                "asset": {
+                  "asset_id": "externa:dominio-publico",
+                  "media_kind": "video",
+                  "origin": "archivo de dominio publico",
+                  "local_path": "external/clip.txt",
+                  "evidence": [{
+                    "evidence_id": "ev-pd",
+                    "kind": "public_domain_record",
+                    "reference": "registro-publico#1931",
+                    "description": "registro que sustenta el dominio publico"
+                  }]
+                }
+              },
+              {
+                "basis": "cc_by",
+                "asset": {
+                  "asset_id": "externa:cc-sin-licencia-concreta",
+                  "media_kind": "image",
+                  "origin": "etiquetado Creative Commons, sin licencia concreta",
+                  "evidence": [{
+                    "evidence_id": "ev-cc",
+                    "kind": "cc_license_record",
+                    "reference": "https://example.org/licencia",
+                    "description": "pagina generica de Creative Commons"
+                  }]
+                }
+              },
+              {
+                "basis": "permission",
+                "asset": {
+                  "asset_id": "externa:permiso-sin-documento",
+                  "media_kind": "image",
+                  "origin": "cedida por correo segun el solicitante"
+                }
+              },
+              {
+                "basis": "fair_use_claim",
+                "asset": {
+                  "asset_id": "externa:uso-legitimo-alegado",
+                  "media_kind": "video",
+                  "origin": "fragmento de un Short ajeno",
+                  "source_url": "https://www.youtube.com/shorts/ejemplo"
+                }
+              },
+              {
+                "basis": "licensed",
+                "asset": {
+                  "asset_id": "externa:licencia-no-comercial",
+                  "media_kind": "audio",
+                  "origin": "biblioteca con licencia no comercial",
+                  "license_id": "EJEMPLO-NC-1",
+                  "commercial_use_allowed": false,
+                  "evidence": [{
+                    "evidence_id": "ev-nc",
+                    "kind": "license_page",
+                    "reference": "https://example.org/nc",
+                    "description": "licencia que excluye el uso previsto"
+                  }]
+                }
+              }
+            ]
+          }
+          JSON
+
+          .venv/bin/python -m app run \
+            --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --sources /tmp/fuentes.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g6.log
+
+          # Cada clase se alcanza de verdad, y ninguna por accidente.
+          grep -q "class_render_allowed=5 class_reference_only=1 class_needs_review=3 class_blocked=1" /tmp/g6.log
+          grep -q "event=needs_review asset=externa:uso-legitimo-alegado basis=fair_use_claim" /tmp/g6.log
+          grep -q "event=blocked asset=externa:licencia-no-comercial basis=licensed" /tmp/g6.log
+
+          .venv/bin/python - "$RUN_ID" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          raiz = Path("runs") / sys.argv[1]
+          led = json.loads((raiz / "provenance_ledger.json").read_text(encoding="utf-8"))
+
+          fuentes = {f["asset_id"]: f for f in led["sources"]}
+          decisiones = {d["asset_id"]: d for d in led["decisions"]}
+
+          # La cadena SourceAsset -> Evidence -> LicenseDecision está completa.
+          assert set(fuentes) == set(decisiones), (set(fuentes) ^ set(decisiones))
+          for aid, d in decisiones.items():
+              assert d["policy_version"] == "provenance_policy_v1", d
+              assert d["reason"].strip(), aid
+              registradas = {e["evidence_id"] for e in fuentes[aid]["evidence"]}
+              assert set(d["evidence_ids"]) <= registradas, (aid, d["evidence_ids"])
+              if d["decision"] == "render_allowed":
+                  assert d["evidence_ids"], f"{aid} autorizado sin evidencia"
+                  assert d["basis"] not in ("unknown", "fair_use_claim"), d
+
+          esperado = {
+              "externa:dominio-publico": "render_allowed",
+              "externa:cc-sin-licencia-concreta": "needs_review",
+              "externa:permiso-sin-documento": "needs_review",
+              "externa:uso-legitimo-alegado": "needs_review",
+              "externa:licencia-no-comercial": "blocked",
+              "reference:0": "reference_only",
+          }
+          real = {k: decisiones[k]["decision"] for k in esperado}
+          assert real == esperado, real
+
+          # Lo que produce el pipeline va con huella: ancla la decisión al contenido.
+          for ruta in led["render_assets"]:
+              fuente = next(f for f in led["sources"] if f.get("local_path") == ruta)
+              assert fuente["sha256"], ruta
+              assert decisiones[fuente["asset_id"]]["decision"] == "render_allowed"
+
+          # Nada ajeno entra al render por estar autorizado: sólo lo que se usa.
+          assert "external/clip.txt" not in led["render_assets"]
+          assert "reference/fuente.txt" not in led["render_assets"]
+
+          # El ledger referencia, no duplica.
+          assert all("local_path" not in d for d in led["decisions"])
+
+          # Y no guarda secretos.
+          crudo = (raiz / "provenance_ledger.json").read_text(encoding="utf-8").lower()
+          for prohibido in ("api_key", "apikey", "token", "bearer", "cookie", "secret", "password"):
+              assert prohibido not in crudo, prohibido
+
+          print(
+              f"procedencia: {len(fuentes)} fuentes, {len(decisiones)} decisiones, "
+              f"{len(led['render_assets'])} utilizables, política "
+              f"{decisiones['reference:0']['policy_version']}"
+          )
+          print("RENDER_ALLOWED != LEGAL_CERTIFIED: la decisión es técnica, no jurídica")
+          PY
+
+          # Idempotencia: con las mismas entradas no se rehace ni se duplica nada.
+          .venv/bin/python -m app run --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --sources /tmp/fuentes.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g6-reanudacion.log
+          grep -q "stage=provenance event=skip" /tmp/g6-reanudacion.log
+
+          # Cambiar el contenido de un recurso autorizado invalida su decisión.
+          echo "contenido sustituido" >> "runs/$RUN_ID/overlay/overlay.ass"
+          .venv/bin/python -m app run --pipeline transformation \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --sources /tmp/fuentes.json \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/g6-hash.log
+          grep -q "stage=provenance event=artifact_invalid" /tmp/g6-hash.log
+
+      # La autenticación de YouTube se comprueba SIN credenciales: en CI no hay
+      # ninguna y no debe haberla para esto. Lo que se demuestra es que la falta
+      # de credenciales produce un desenlace explícito en vez de un error opaco,
+      # y que no se llama a ningún endpoint de Google.
+      - name: La comprobación de YouTube falla con claridad sin credenciales
+        run: |
+          set +e
+          .venv/bin/python -m app youtube-auth > /tmp/auth.json 2> /tmp/auth.log
+          CODIGO=$?
+          set -e
+          test "$CODIGO" = "1" || { echo "se esperaba salida 1, hubo $CODIGO"; exit 1; }
+
+          .venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          datos = json.loads(Path("/tmp/auth.json").read_text(encoding="utf-8"))
+          assert datos["result"] == "CREDENTIALS_MISSING", datos
+          assert datos["authenticated"] is False, datos
+          assert datos["correct_channel"] is False, datos
+          assert datos["retryable"] is False, datos
+          assert datos["channel_id"] is None, datos
+          assert datos["scope_requested"].endswith("/auth/youtube.upload"), datos
+
+          # Ni la salida ni el log pueden tener forma de credencial.
+          for ruta in ("/tmp/auth.json", "/tmp/auth.log"):
+              texto = Path(ruta).read_text(encoding="utf-8").lower()
+              for prohibido in ("refresh_token", "client_secret", "access_token", "ya29."):
+                  assert prohibido not in texto, (ruta, prohibido)
+
+          print(f"AUTH CHECK sin credenciales: {datos['result']}, sin filtraciones")
+          PY
+
+      # El alta por dispositivo tampoco tiene credenciales en CI y nunca debe
+      # tenerlas: es interactiva por definición. Lo que se demuestra aquí es que
+      # el comando existe, que sin el JSON del cliente falla de forma explícita
+      # y que por ese camino no se contacta con Google ni se filtra nada.
+      - name: El alta por dispositivo falla con claridad sin credenciales
+        run: |
+          set +e
+          .venv/bin/python -m app youtube-auth-device \
+            --credentials /tmp/no-existe-jamas.json > /tmp/dev.json 2> /tmp/dev.log
+          CODIGO=$?
+          set -e
+          test "$CODIGO" = "2" || { echo "se esperaba salida 2, hubo $CODIGO"; exit 1; }
+
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+
+          salida = Path("/tmp/dev.json").read_text(encoding="utf-8")
+          error = Path("/tmp/dev.log").read_text(encoding="utf-8")
+
+          # stdout es un documento: si no hay documento, queda vacío.
+          assert salida.strip() == "", repr(salida)
+          assert "EntradaInvalida" in error, error
+          assert "TVs and Limited Input devices" in error, error
+
+          for prohibido in ("refresh_token", "client_secret", "device_code", "ya29.", "1//"):
+              assert prohibido not in error.lower(), prohibido
+
+          print("Alta por dispositivo sin credenciales: falla limpio, sin filtraciones")
+          PY
+
+      # El alcance del alta por dispositivo es una excepción aprobada de D17, y
+      # una excepción que se propaga en silencio deja de ser una excepción.
+      - name: Los dos alcances siguen separados
+        run: |
+          .venv/bin/python - <<'PY'
+          from app.adapters.youtube.auth import SCOPE_GESTION, SCOPE_SUBIDA
+          from app.config.settings import Settings
+
+          s = Settings.desde_entorno()
+          assert s.youtube_scope == SCOPE_SUBIDA, s.youtube_scope
+          assert s.youtube_device_scope == SCOPE_GESTION, s.youtube_device_scope
+          assert SCOPE_SUBIDA.endswith("/auth/youtube.upload"), SCOPE_SUBIDA
+          assert SCOPE_GESTION.endswith("/auth/youtube"), SCOPE_GESTION
+          assert s.youtube_scope != s.youtube_device_scope
+
+          print(f"D17: {SCOPE_SUBIDA}")
+          print(f"dispositivo (excepcion aprobada): {SCOPE_GESTION}")
+          PY
+
+      - name: Publicar artefactos de voz, transformación y QA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-4-transformation-qa
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runs/*/manifest.json
+            runs/*/transcript.json
+            runs/*/translation.json
+            runs/*/adapted_script.json
+            runs/*/voice_asset.json
+            runs/*/word_boundaries.json
+            runs/*/subtitle_asset.json
+            runs/*/subtitles/subtitles.srt
+            runs/*/subtitles/subtitles.ass
+            runs/*/overlay_spec.json
+            runs/*/overlay/overlay.ass
+            runs/*/provenance_ledger.json
+            runs/*/transformation_set.json
+            runs/*/qa_result.json
+
+  integration:
+    name: E2E con el motor real
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout con submódulo del motor
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Registrar el commit fijado del motor
+        run: git -C vendor/moneyprinterturbo rev-parse HEAD
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt
+
+      - name: Preparar el motor
+        run: ./scripts/setup_mpt.sh
+
+      - name: Ejecutar una corrida completa
+        id: corrida
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          .venv/bin/python -m app run --run-id "$RUN_ID"
+
+      - name: Revalidar los artefactos de la corrida
+        run: .venv/bin/python -m app validate "${{ steps.corrida.outputs.run_id }}"
+
+      - name: Comprobar que reanudar omite las etapas ya hechas
+        run: |
+          .venv/bin/python -m app run --run-id "${{ steps.corrida.outputs.run_id }}" 2>&1 | tee /tmp/reanudacion.log
+          grep -q "stage=prepare_input event=skip" /tmp/reanudacion.log
+          grep -q "stage=render event=skip" /tmp/reanudacion.log
+
+      # El extremo a extremo completo, con el motor y FFmpeg **reales**. El LLM
+      # y el TTS son falsos porque no aportan nada a lo que se prueba aquí y
+      # exigirían credenciales; el vídeo, en cambio, se produce de verdad.
+      - name: E2E completo con el motor y FFmpeg reales
+        id: e2e
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+          # Un recurso consultado solo como referencia, que no debe tocar el vídeo.
+          mkdir -p "runs/$RUN_ID/reference"
+          echo "material consultado como referencia" > "runs/$RUN_ID/reference/fuente.txt"
+
+          .venv/bin/python -m app run \
+            --pipeline e2e \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration 30 \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/e2e.log
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline e2e
+
+          # El MP4 final existe de verdad, y no es el intermedio del motor.
+          test -s "runs/$RUN_ID/final/short.mp4"
+          test -s "runs/$RUN_ID/render/final.mp4"
+          test -s "runs/$RUN_ID/final_video.json"
+          test -s "runs/$RUN_ID/final_video_qa.json"
+          test -s "runs/$RUN_ID/qa/contact_sheet.png"
+          sha256sum "runs/$RUN_ID/final/short.mp4"
+
+          .venv/bin/python - "$RUN_ID" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+
+          raiz = Path("runs") / sys.argv[1]
+          final = json.loads((raiz / "final_video.json").read_text(encoding="utf-8"))
+          qa = json.loads((raiz / "final_video_qa.json").read_text(encoding="utf-8"))
+          job = json.loads((raiz / "render_job.json").read_text(encoding="utf-8"))
+          ledger = json.loads((raiz / "provenance_ledger.json").read_text(encoding="utf-8"))
+
+          mp4 = raiz / final["output_path"]
+          huella = hashlib.sha256(mp4.read_bytes()).hexdigest()
+          assert final["sha256"] == huella, "la huella registrada no es la del archivo"
+          assert (final["width"], final["height"]) == (1080, 1920), final
+          assert final["video_codec"] == "h264", final["video_codec"]
+          assert final["audio_codec"] == "aac", final["audio_codec"]
+          assert final["pixel_format"] == "yuv420p", final["pixel_format"]
+          assert final["audio_sample_rate_hz"] > 0, final
+          assert final["duration_s"] > 0, final
+          assert final["output_path"] != final["combined_path"], "el final es el intermedio"
+
+          # Subtítulos y overlay entraron a la composición.
+          assert job["subtitle_path"].endswith(".ass"), job
+          assert job["overlay_path"].endswith(".ass"), job
+          assert job["composition"] == "ffmpeg-libass-burn-in", job
+
+          # El recurso de referencia no llegó al vídeo por ninguna vía.
+          referencia = "reference/fuente.txt"
+          por_id = {f["asset_id"]: f for f in ledger["sources"]}
+          decisiones = {d["asset_id"]: d for d in ledger["decisions"]}
+          clases = {
+              f["local_path"]: decisiones[f["asset_id"]]["decision"]
+              for f in ledger["sources"]
+              if f.get("local_path") and f["asset_id"] in decisiones
+          }
+          assert clases[referencia] == "reference_only", clases
+          assert referencia not in ledger["render_assets"], ledger["render_assets"]
+          assert referencia not in [
+              job["audio_path"], job["subtitle_path"], job["overlay_path"],
+              *job["materials"],
+          ], job
+
+          assert qa["technical_qa_ok"] is True, [c for c in qa["checks"] if not c["ok"]]
+          assert qa["editorial_legal_assessment"]["status"] == "NOT_ASSESSED"
+          print(
+              f"MP4 {final['width']}x{final['height']} {final['video_codec']}/"
+              f"{final['audio_codec']} {final['duration_s']:.2f}s "
+              f"{final['file_size_bytes']} bytes\nsha256={huella}\n"
+              f"QA final: {qa['status']}, {len(qa['checks'])} checks, "
+              f"medido con {final['inspected_with']}"
+          )
+          PY
+
+      # No basta con que el job falle: hay que ver que el motor no llegó a
+      # ejecutarse. Si arrancara, el vídeo ya estaría hecho con material que
+      # nadie autorizó, y eso no se deshace.
+      - name: Ninguna clase que no autorice llega al motor
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+        run: |
+          .venv/bin/python - <<'PY'
+          import json, shutil, uuid
+          from pathlib import Path
+
+          from app.config.settings import Settings
+          from app.contracts.models import (
+              BaseLicencia, ClaseFuente, ProvenanceLedger, RenderResult,
+          )
+          from app.core.errors import ArtefactoCorrupto, ProcedenciaInvalida
+          from app.core.manifest import Manifest
+          from app.core.stage_runner import StageRunner
+          from app.core.workspace import Workspace
+          from app.pipeline import qa, render, transformation, voice
+          from app.pipeline.linguistic import construir_pipeline_linguistico
+
+          s = Settings.desde_entorno()
+
+          def corrida_hasta_el_job():
+              """Una corrida con todo listo y el render por delante, sin tocar el motor."""
+              rid = uuid.uuid4()
+              ws = Workspace(s.raiz_runs, rid); ws.crear()
+              man, _ = Manifest.cargar_o_crear(ws.dir, rid, config=s.publico(), versions={})
+              runner = StageRunner(ws, man, s, {
+                  "transcript_path": "tests/fixtures/transcripts/estudio_atencion.json",
+                  "target_duration_seconds": 30,
+              })
+              etapas = (construir_pipeline_linguistico() + voice.construir_pipeline_voz()
+                        + [render.ETAPA_MATERIAL] + qa.construir_pipeline_transformacion())
+              for e in etapas:
+                  runner.ejecutar(e)
+              assert not (ws.dir / "render" / "mpt.log").exists(), "el motor ya había corrido"
+              return runner, ws
+
+          def guardar(ws, runner, ledger):
+              ws.escribir_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ledger)
+              runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+
+          def sin_motor(ws, caso):
+              assert not (ws.dir / "render").exists(), f"{caso}: el motor se ejecutó"
+              assert not ws.existe("render_job"), caso
+              assert not ws.existe("render_result"), caso
+
+          def degradar(ledger, material, clase):
+              objetivo = ledger.fuente_de(material).asset_id
+              return ledger.model_copy(update={
+                  "decisions": [
+                      d.model_copy(update={
+                          "decision": clase,
+                          "basis": BaseLicencia.desconocida,
+                          "evidence_ids": [],
+                          "reason": f"degradado a {clase.value} para comprobar el bloqueo",
+                      })
+                      if d.asset_id == objetivo else d for d in ledger.decisions
+                  ],
+                  "render_assets": [r for r in ledger.render_assets if r != material],
+              })
+
+          # --- Cada clase que no autoriza, una por una --------------------------
+          for clase in (ClaseFuente.solo_referencia, ClaseFuente.revision_pendiente,
+                        ClaseFuente.bloqueado):
+              runner, ws = corrida_hasta_el_job()
+              material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+              led = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+              guardar(ws, runner, degradar(led, material, clase))
+              try:
+                  runner.ejecutar(render.ETAPA_JOB)
+              except ProcedenciaInvalida as exc:
+                  print(f"BLOQUEADO {clase.value}: {exc.mensaje}")
+              else:
+                  raise SystemExit(f"el job se construyó con un recurso {clase.value}")
+              sin_motor(ws, clase.value)
+
+          # --- Un recurso que nadie declaró ------------------------------------
+          runner, ws = corrida_hasta_el_job()
+          material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+          led = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+          objetivo = led.fuente_de(material).asset_id
+          guardar(ws, runner, led.model_copy(update={
+              "sources": [f for f in led.sources if f.asset_id != objetivo],
+              "decisions": [d for d in led.decisions if d.asset_id != objetivo],
+              "render_assets": [r for r in led.render_assets if r != material],
+          }))
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ProcedenciaInvalida as exc:
+              print(f"BLOQUEADO sin declarar: {exc.mensaje}")
+          else:
+              raise SystemExit("el job se construyó con un recurso sin declarar")
+          sin_motor(ws, "sin declarar")
+
+          # --- Un recurso registrado pero sin decidir --------------------------
+          runner, ws = corrida_hasta_el_job()
+          material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+          led = ws.leer_artefacto(transformation.ARTEFACTO_PROCEDENCIA, ProvenanceLedger)
+          objetivo = led.fuente_de(material).asset_id
+          guardar(ws, runner, led.model_copy(update={
+              "decisions": [d for d in led.decisions if d.asset_id != objetivo],
+              "render_assets": [r for r in led.render_assets if r != material],
+          }))
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ProcedenciaInvalida as exc:
+              print(f"BLOQUEADO sin decisión: {exc.mensaje}")
+          else:
+              raise SystemExit("el job se construyó sin decisión de licencia")
+          sin_motor(ws, "sin decisión")
+
+          # --- Una decisión que se contradice a sí misma -----------------------
+          # Se edita el JSON a mano porque el contrato no permite construirla: un
+          # render_allowed sobre base unknown no existe ni en memoria.
+          runner, ws = corrida_hasta_el_job()
+          ruta = ws.ruta_artefacto(transformation.ARTEFACTO_PROCEDENCIA)
+          datos = json.loads(ruta.read_text(encoding="utf-8"))
+          datos["decisions"][0]["basis"] = "unknown"
+          ruta.write_text(json.dumps(datos), encoding="utf-8")
+          runner.producidos.pop(transformation.ARTEFACTO_PROCEDENCIA, None)
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ArtefactoCorrupto as exc:
+              print(f"BLOQUEADO decisión inconsistente: {exc}")
+          else:
+              raise SystemExit("el job se construyó con una decisión inconsistente")
+          sin_motor(ws, "decisión inconsistente")
+
+          # --- Un archivo que cambió tras autorizarse -------------------------
+          runner, ws = corrida_hasta_el_job()
+          material = ws.leer_artefacto(render.ARTEFACTO_MATERIAL, RenderResult).output_path
+          archivo = ws.ruta(material)
+          archivo.write_bytes(archivo.read_bytes() + b"\x00sustituido")
+          try:
+              runner.ejecutar(render.ETAPA_JOB)
+          except ProcedenciaInvalida as exc:
+              print(f"BLOQUEADO hash distinto: {exc.mensaje}")
+          else:
+              raise SystemExit("el job se construyó con un archivo sustituido")
+          sin_motor(ws, "hash distinto")
+
+          print("MPT no se invocó en ninguno de los seis casos: no existe runs/<run>/render/")
+          PY
+
+      - name: Reanudar no vuelve a renderizar
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+        run: |
+          RUN_ID="${{ steps.e2e.outputs.run_id }}"
+          ANTES=$(sha256sum "runs/$RUN_ID/final/short.mp4" | cut -d' ' -f1)
+          .venv/bin/python -m app run --pipeline e2e \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --reference-asset reference/fuente.txt \
+            --run-id "$RUN_ID" 2>&1 | tee /tmp/e2e-reanudacion.log
+          for ETAPA in render_material render_job render composition final_video_qa; do
+            grep -q "stage=$ETAPA event=skip" /tmp/e2e-reanudacion.log
+          done
+          DESPUES=$(sha256sum "runs/$RUN_ID/final/short.mp4" | cut -d' ' -f1)
+          test "$ANTES" = "$DESPUES"
+          echo "el MP4 no se tocó: $DESPUES"
+
+      - name: Publicar artefactos de la corrida
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-5-e2e
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runs/*/manifest.json
+            runs/*/adapted_script.json
+            runs/*/voice_asset.json
+            runs/*/subtitle_asset.json
+            runs/*/overlay_spec.json
+            runs/*/provenance_ledger.json
+            runs/*/transformation_set.json
+            runs/*/qa_result.json
+            runs/*/render_job.json
+            runs/*/render_result.json
+            runs/*/final_video.json
+            runs/*/final_video_qa.json
+            runs/*/final/short.mp4
+            runs/*/subtitles/subtitles.srt
+            runs/*/subtitles/subtitles.ass
+            runs/*/overlay/overlay.ass
+            runs/*/qa/frames/*.png
+            runs/*/qa/contact_sheet.png
+            runs/*/render/mpt.log
+
+  # Único trabajo que sale a internet. Va aparte para que una caída de Edge TTS
+  # no invalide la señal del código: si este sale en rojo con `tests` en verde,
+  # el problema es el servicio externo. No se marca continue-on-error, porque
+  # eso lo pintaría de verde y ocultaría precisamente lo que hay que ver.
+  tts-real:
+    name: Edge TTS real (aislado)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt
+
+      # Edge TTS no requiere credencial: no hay ningún secreto que pasar aquí.
+      - name: Cadena completa contra el Edge TTS real
+        env:
+          RUN_REAL_TTS: "1"
+          TTS_VOICE: es-CR-JuanNeural
+        run: .venv/bin/python -m pytest tests/test_tts_real.py -v -s

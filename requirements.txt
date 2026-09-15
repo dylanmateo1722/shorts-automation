@@ -1,0 +1,6 @@
+# Dependencias de ejecución.
+# Ninguna requiere credencial: Edge TTS no usa API key y FFmpeg viene
+# empaquetado con imageio-ffmpeg.
+edge-tts==7.2.7
+imageio-ffmpeg==0.6.0
+pydantic==2.12.5
