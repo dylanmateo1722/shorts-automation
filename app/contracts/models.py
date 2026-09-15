@@ -42,10 +42,14 @@ SCHEMA_VERSION_VOZ = "1.0"
 # obligar a reescribir el de procedencia.
 SCHEMA_VERSION_TRANSFORMACION = "1.0"
 
-# Los de publicación, igual. Empiezan en "1.0" porque los contratos de Gate 1 que
+# Los de publicación, igual. Empezaron en "1.0" porque los contratos de Gate 1 que
 # llevaban estos nombres nunca se produjeron ni se consumieron: no hay artefactos
 # persistidos con el esquema anterior que una versión nueva tuviera que distinguir.
-SCHEMA_VERSION_PUBLICACION = "1.0"
+#
+# "1.1" lo sube Gate 7.2, que añade a los contratos ya existentes la referencia a
+# la sesión de subida y el resultado de la reconciliación. Es un cambio aditivo:
+# un artefacto "1.0" sigue validando, porque los campos nuevos son opcionales.
+SCHEMA_VERSION_PUBLICACION = "1.1"
 
 # Reglas de legibilidad del subtítulo, fijadas por el contrato. Son una
 # heurística inicial —no una garantía de que ningún cue pase de 32 caracteres—
@@ -1423,6 +1427,271 @@ def clave_idempotencia(run_id: UUID) -> str:
     return hashlib.sha256(f"publish:{run_id}".encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Gate 7.2: sesión de subida y reconciliación
+#
+# Tres piezas que no se solapan con las tres anteriores:
+#
+#   UploadSession          la sesión resumable viva      (secreto operativo)
+#   ReconciliationRequest  qué hay que averiguar         (pregunta)
+#   ReconciliationResult   qué se averiguó               (respuesta)
+# ---------------------------------------------------------------------------
+
+
+def publication_fingerprint(
+    run_id: UUID, video_sha256: str, metadata_sha256: str
+) -> str:
+    """Identidad interna y determinista de una publicación.
+
+    **YouTube no conoce este valor y no sirve para nada del lado del proveedor.**
+    No es una clave de idempotencia remota: mandarla no evitaría un duplicado,
+    porque no hay dónde mandarla. Sirve para que dos intentos nuestros puedan
+    reconocerse como la misma publicación —mismo run, mismo vídeo, misma
+    metadata— y para que un cambio en cualquiera de los tres produzca una
+    identidad distinta.
+
+    Se distingue de ``clave_idempotencia``, que solo deriva del ``run_id``: el
+    fingerprint ata además el contenido, así que cambiar el MP4 o el título lo
+    cambia. Los dos coexisten a propósito.
+
+    Los componentes van separados por ``:`` para que no puedan solaparse: sin
+    separador, dos ternas distintas podrían concatenarse en la misma cadena.
+    """
+    crudo = f"{run_id}:{video_sha256}:{metadata_sha256}"
+    return hashlib.sha256(crudo.encode("utf-8")).hexdigest()
+
+
+class UploadSession(BaseModel):
+    """La sesión resumable abierta contra el proveedor.
+
+    ``session_url`` es un **secreto operativo**: quien lo tenga puede subir
+    bytes a esa sesión y completar la publicación. Por eso se declara con
+    ``exclude=True`` y ``repr=False``, y la consecuencia es deliberada:
+
+    * no aparece en ``model_dump()`` ni en ``model_dump_json()``, así que no
+      puede llegar a ``runs/`` aunque alguien embeba la sesión en un artefacto
+      —``Workspace.escribir_artefacto`` serializa con ``model_dump_json``—;
+    * no aparece en el ``repr`` ni en el ``str``, así que no se cuela en una
+      traza ni en un mensaje de error.
+
+    **Una sesión no puede reconstruirse desde un artefacto.** ``session_url`` es
+    obligatorio y está excluido del volcado, de modo que el JSON resultante no
+    valida como ``UploadSession``. Eso no es un inconveniente: es el mecanismo
+    que hace que un proceso reiniciado *no pueda* creer que tiene una sesión
+    viva. Sin URL no hay consulta posible, y el desenlace honesto es ``UNKNOWN``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: TextoNoVacio = "youtube"
+    #: Secreto operativo. Nunca se serializa ni se representa. Ver el docstring.
+    session_url: str = Field(repr=False, exclude=True)
+    run_id: UUID
+    #: Número de sesión dentro del intento. Empieza en 1.
+    attempt: int = Field(ge=1)
+    video_sha256: Sha256Hex
+    metadata_sha256: Sha256Hex
+    total_bytes: int = Field(gt=0)
+    bytes_confirmed: int = Field(default=0, ge=0)
+    created_at: datetime = Field(default_factory=_ahora)
+    updated_at: datetime = Field(default_factory=_ahora)
+    #: Cuándo deja de servir la sesión, si el proveedor lo informa.
+    expires_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _comprobar_sesion(self) -> "UploadSession":
+        if not self.session_url.strip():
+            raise ValueError("una sesión sin URL no es una sesión")
+        if self.bytes_confirmed > self.total_bytes:
+            raise ValueError(
+                f"bytes_confirmed ({self.bytes_confirmed}) supera total_bytes "
+                f"({self.total_bytes}): el proveedor no puede haber recibido más "
+                f"de lo que hay"
+            )
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at es anterior a created_at")
+        return self
+
+    @property
+    def referencia(self) -> str:
+        """Identificador no secreto de esta sesión, apto para persistir.
+
+        Es el SHA-256 del URL. Permite afirmar «este trabajo tuvo *esta* sesión»
+        sin revelar cuál, y no es reversible.
+        """
+        return hashlib.sha256(self.session_url.encode("utf-8")).hexdigest()
+
+    @property
+    def completa(self) -> bool:
+        return self.bytes_confirmed >= self.total_bytes
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return (
+            f"UploadSession({self.provider}, {self.bytes_confirmed}/"
+            f"{self.total_bytes} bytes, ref={self.referencia[:12]}…)"
+        )
+
+
+class MotivoReconciliacion(str, Enum):
+    """Por qué hubo que ir a preguntar. Conjunto cerrado."""
+
+    respuesta_perdida = "RESPONSE_LOST"
+    tiempo_agotado = "UPLOAD_TIMEOUT"
+    conexion_reiniciada = "CONNECTION_RESET"
+    resultado_desconocido = "UNKNOWN_PROVIDER_RESULT"
+    proceso_interrumpido = "PROCESS_INTERRUPTED"
+
+
+class DesenlaceReconciliacion(str, Enum):
+    """Qué se averiguó. Conjunto cerrado.
+
+    ``UNKNOWN`` no es un fallo del sistema: es la respuesta correcta cuando no
+    hay evidencia. Tratarlo como «no se subió» es exactamente el error que este
+    Gate existe para impedir.
+    """
+
+    confirmado_subido = "CONFIRMED_UPLOADED"
+    confirmado_no_subido = "CONFIRMED_NOT_UPLOADED"
+    subida_en_curso = "UPLOAD_IN_PROGRESS"
+    desconocido = "UNKNOWN"
+
+
+class ConfianzaReconciliacion(str, Enum):
+    """De dónde sale la conclusión.
+
+    No hay ningún nivel que signifique «lo deducimos»: o el proveedor lo dijo, o
+    no se sabe.
+    """
+
+    #: El proveedor devolvió el recurso o un desenlace inequívoco.
+    provider_confirmado = "PROVIDER_CONFIRMED"
+    #: El proveedor informó progreso, pero no desenlace.
+    provider_parcial = "PROVIDER_PARTIAL"
+    #: No se pudo obtener evidencia de ningún tipo.
+    sin_evidencia = "NONE"
+
+
+class ReconciliationRequest(Artefacto):
+    """Qué hay que averiguar sobre una subida cuyo resultado no consta.
+
+    ``upload_session`` es opcional **por diseño**, no por comodidad. Cuando el
+    proceso se ha reiniciado, el ``session_url`` ya no existe en memoria y no hay
+    forma documentada de recuperarlo: la petición se construye sin sesión y el
+    único desenlace honesto es ``UNKNOWN``. El validador lo impone para que ese
+    caso no pueda representarse de otra manera.
+    """
+
+    schema_version: str = SCHEMA_VERSION_PUBLICACION
+
+    attempt: int = Field(ge=1)
+    reason: MotivoReconciliacion
+    publication_fingerprint: Sha256Hex
+    #: La sesión viva, si todavía se tiene. ``None`` tras un reinicio.
+    upload_session: UploadSession | None = None
+    last_known_bytes: int = Field(default=0, ge=0)
+    requested_at: datetime = Field(default_factory=_ahora)
+
+    @model_validator(mode="after")
+    def _comprobar_peticion(self) -> "ReconciliationRequest":
+        if self.reason is MotivoReconciliacion.proceso_interrumpido:
+            if self.upload_session is not None:
+                raise ValueError(
+                    "'PROCESS_INTERRUPTED' significa que el proceso se reinició y "
+                    "el session_url se perdió con él; una petición así no puede "
+                    "traer una sesión viva"
+                )
+        if self.upload_session is not None:
+            if self.upload_session.run_id != self.run_id:
+                raise ValueError(
+                    "la sesión pertenece a otra corrida que la que se reconcilia"
+                )
+            if self.upload_session.bytes_confirmed > self.last_known_bytes:
+                raise ValueError(
+                    "last_known_bytes es menor que los bytes que la propia sesión "
+                    "da por confirmados"
+                )
+        return self
+
+    @property
+    def sesion_consultable(self) -> bool:
+        """Si existe un URL con el que preguntar al proveedor."""
+        return self.upload_session is not None
+
+
+class ReconciliationResult(Artefacto):
+    """Qué se averiguó, y con qué respaldo.
+
+    Los validadores impiden las combinaciones que mentirían: no hay
+    ``CONFIRMED_UPLOADED`` sin identificador ni sin confirmación del proveedor, y
+    no hay ``UNKNOWN`` que traiga un ``video_id`` o que presuma de evidencia.
+    """
+
+    schema_version: str = SCHEMA_VERSION_PUBLICACION
+
+    attempt: int = Field(ge=1)
+    outcome: DesenlaceReconciliacion
+    video_id: str | None = None
+    #: Qué dijo el proveedor, en texto corto y saneado.
+    observed_state: str = ""
+    confidence: ConfianzaReconciliacion
+    checked_at: datetime = Field(default_factory=_ahora)
+    #: Constancia de en qué se apoya la conclusión. Texto saneado, sin secretos.
+    evidence: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _comprobar_resultado(self) -> "ReconciliationResult":
+        tiene_id = bool((self.video_id or "").strip())
+
+        if self.outcome is DesenlaceReconciliacion.confirmado_subido:
+            if not tiene_id:
+                raise ValueError(
+                    "'CONFIRMED_UPLOADED' sin video_id no confirma nada: si el "
+                    "proveedor aceptó el vídeo, devolvió su identificador"
+                )
+            if self.confidence is not ConfianzaReconciliacion.provider_confirmado:
+                raise ValueError(
+                    "'CONFIRMED_UPLOADED' exige confirmación del proveedor; "
+                    "cualquier otra confianza sería una deducción nuestra"
+                )
+        elif tiene_id:
+            raise ValueError(
+                f"hay video_id con desenlace {self.outcome.value!r}: solo "
+                f"'CONFIRMED_UPLOADED' afirma que existe un vídeo"
+            )
+
+        if self.outcome is DesenlaceReconciliacion.desconocido:
+            if self.confidence is not ConfianzaReconciliacion.sin_evidencia:
+                raise ValueError(
+                    "'UNKNOWN' con evidencia es una contradicción: si hubiera "
+                    "evidencia, el desenlace no sería desconocido"
+                )
+
+        if (
+            self.outcome is DesenlaceReconciliacion.subida_en_curso
+            and self.confidence is ConfianzaReconciliacion.sin_evidencia
+        ):
+            raise ValueError(
+                "'UPLOAD_IN_PROGRESS' sin evidencia no es observable: saber que "
+                "una subida va por la mitad exige que el proveedor lo haya dicho"
+            )
+        return self
+
+    @property
+    def permite_nueva_sesion(self) -> bool:
+        """Si es lícito abrir otra sesión de subida.
+
+        **Solo** ``CONFIRMED_NOT_UPLOADED``. Esta propiedad es la regla absoluta
+        de Gate 7.2 escrita en el contrato: ``UNKNOWN`` devuelve ``False``, así
+        que ningún camino puede convertir la incertidumbre en una subida nueva.
+        """
+        return self.outcome is DesenlaceReconciliacion.confirmado_no_subido
+
+    @property
+    def exige_revision(self) -> bool:
+        """Si el desenlace obliga a que lo mire una persona."""
+        return self.outcome is DesenlaceReconciliacion.desconocido
+
+
 class PublishMetadata(Artefacto):
     """Qué se quiere publicar. Intención, no resultado.
 
@@ -1479,6 +1748,13 @@ class PublishJob(Artefacto):
     #: reconciliar, y un ``FAILED`` sin motivo no distingue un fallo de un
     #: abandono.
     reason: str | None = None
+    #: Gate 7.2. Huella no secreta de la sesión de subida (``UploadSession.
+    #: referencia``). Aquí **no** va el ``session_url``: es un secreto operativo
+    #: y este artefacto se persiste en ``runs/``. Guardar la huella permite
+    #: afirmar que el trabajo tuvo una sesión concreta sin revelar cuál.
+    upload_session_ref: Sha256Hex | None = None
+    #: Gate 7.2. Lo último que se averiguó sobre una subida incierta.
+    reconciliation: ReconciliationResult | None = None
 
     @model_validator(mode="after")
     def _comprobar_trabajo(self) -> "PublishJob":
@@ -1576,6 +1852,10 @@ class PublishResult(Artefacto):
     completed_at: datetime | None = None
     metadata_sha256: Sha256Hex | None = None
     video_sha256: Sha256Hex | None = None
+    #: Gate 7.2. Qué se averiguó cuando el resultado de la subida no constaba.
+    #: Un ``NEEDS_REVIEW`` que venga de una incertidumbre lo trae; uno que venga
+    #: de una precondición incumplida, no.
+    reconciliation: ReconciliationResult | None = None
 
     @model_validator(mode="after")
     def _comprobar_resultado(self) -> "PublishResult":

@@ -116,7 +116,10 @@ def _resultado(**extra) -> PublishResult:
 
 def test_los_tres_contratos_validan_y_declaran_su_version():
     for artefacto in (_metadata(), _job(), _resultado()):
-        assert artefacto.schema_version == SCHEMA_VERSION_PUBLICACION == "1.0"
+        # "1.1" lo subió Gate 7.2 al añadir la referencia a la sesión de subida
+        # y el resultado de la reconciliación. Es aditivo: un artefacto "1.0"
+        # sigue validando porque los campos nuevos son opcionales.
+        assert artefacto.schema_version == SCHEMA_VERSION_PUBLICACION == "1.1"
         assert isinstance(artefacto.run_id, uuid.UUID)
         assert artefacto.created_at.tzinfo is not None
 
@@ -619,6 +622,9 @@ def test_el_contrato_no_inventa_campos_de_la_api_de_youtube():
         "provider", "video_id", "url", "status", "privacy_status",
         "upload_attempts", "uploaded_at", "completed_at",
         "metadata_sha256", "video_sha256",
+        # Gate 7.2. No es un campo de la API de YouTube: es qué averiguamos
+        # nosotros cuando el desenlace de una subida no constaba.
+        "reconciliation",
     }
 
 
@@ -670,7 +676,12 @@ def test_los_tres_contratos_no_comparten_responsabilidad():
 
     assert metadata & job == comunes
     assert metadata & resultado == comunes | {"privacy_status"}
-    assert job & resultado == comunes
+    # ``reconciliation`` aparece en los dos desde Gate 7.2, y es la única
+    # excepción aprobada a la separación: el trabajo lo lleva porque explica por
+    # qué está donde está —un ``NEEDS_REVIEW`` sin ello no diría qué revisar—, y
+    # el resultado lo lleva porque es la evidencia de lo que se observó. La
+    # aserción sigue siendo exhaustiva: cualquier solapamiento nuevo la rompe.
+    assert job & resultado == comunes | {"reconciliation"}
 
 
 def test_los_tres_contratos_comparten_el_run_id_de_la_corrida():
