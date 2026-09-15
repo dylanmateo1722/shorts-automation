@@ -1,0 +1,76 @@
+# Comprobación manual de la autorización real de YouTube.
+#
+# Este workflow está separado del CI general y solo se puede lanzar con
+# workflow_dispatch. Lee las credenciales exclusivamente desde GitHub Secrets,
+# ejecuta el AUTH CHECK y no contiene ningún paso de subida/publicación.
+name: YouTube Auth Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  youtube-auth:
+    name: AUTH CHECK del canal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt
+
+      - name: AUTH CHECK real de YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          EXPECTED_YOUTUBE_CHANNEL_ID: ${{ secrets.EXPECTED_YOUTUBE_CHANNEL_ID }}
+        run: |
+          set +x
+          .venv/bin/python -m app youtube-auth > /tmp/youtube-auth.json
+          CODIGO=$?
+          cat /tmp/youtube-auth.json
+          test "$CODIGO" = "0" || {
+            echo "AUTH CHECK falló; no se continúa con ninguna operación de YouTube."
+            exit "$CODIGO"
+          }
+
+          .venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          datos = json.loads(Path("/tmp/youtube-auth.json").read_text(encoding="utf-8"))
+          assert datos["result"] == "AUTHENTICATED", datos
+          assert datos["authenticated"] is True, datos
+          assert datos["correct_channel"] is True, datos
+          assert datos["retryable"] is False, datos
+          assert datos["channel_id"], datos
+
+          # La salida pública del AUTH CHECK no debe contener credenciales.
+          texto = Path("/tmp/youtube-auth.json").read_text(encoding="utf-8").lower()
+          for prohibido in ("refresh_token", "client_secret", "access_token", "bearer ", "ya29."):
+              assert prohibido not in texto, prohibido
+
+          print("AUTH CHECK REAL: AUTHENTICATED")
+          print("Canal esperado: coincide")
+          print("Sin subida ni publicación: PASS")
+          PY
