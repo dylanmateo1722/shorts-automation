@@ -71,3 +71,38 @@ from app.adapters.youtube.device_bootstrap import (  # noqa: F401
     instrucciones_dispositivo,
     solicitar_codigo,
 )
+
+# Gate 7.2: publicación. El publisher es un módulo hermano de ``auth``, no una
+# ampliación suyo: la autenticación tiene que poder comprobarse sin que exista
+# la capacidad de publicar.
+from app.adapters.youtube.upload import (  # noqa: F401
+    MULTIPLO_FRAGMENTO,
+    TAMANO_FRAGMENTO_BYTES,
+    URL_SUBIDA,
+    URL_VIDEOS,
+    EstadoRemoto,
+    RecursoRemoto,
+    RespuestaHTTP,
+    RespuestaPerdida,
+    SesionDesconocida,
+    Transporte,
+    TransporteUrllib,
+    consultar_progreso,
+    huella_metadata,
+    iniciar_sesion,
+    leer_video,
+    subir_fragmento,
+    url_publica,
+)
+from app.adapters.youtube.reconciliation import (  # noqa: F401
+    MOTIVOS_CON_RIESGO_DE_DUPLICADO,
+    reconciliar,
+)
+from app.adapters.youtube.publisher import (  # noqa: F401
+    MAX_INTENTOS,
+    MAX_SESIONES,
+    ResultadoPublicacion,
+    Verificacion,
+    publicar,
+    verificar,
+)
