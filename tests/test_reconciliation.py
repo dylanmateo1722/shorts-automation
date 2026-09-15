@@ -337,3 +337,39 @@ def test_el_fingerprint_no_se_confunde_con_la_clave_de_idempotencia():
 
     run_id = uuid4()
     assert publication_fingerprint(run_id, "a" * 64, "b" * 64) != clave_idempotencia(run_id)
+
+
+# ---------------------------------------------------------------------------
+# El acoplamiento entre reconciliación y publisher, hecho explícito
+# ---------------------------------------------------------------------------
+
+
+def test_el_progreso_se_escribe_y_se_lee_con_el_mismo_formato():
+    from app.adapters.youtube.reconciliation import formatear_progreso, leer_progreso
+
+    texto = formatear_progreso(1024, 4096)
+    assert leer_progreso(texto) == 1024
+
+
+def test_un_observed_state_que_no_es_progreso_no_se_adivina():
+    """Devolver un número inventado haría reanudar desde el offset equivocado."""
+    from app.adapters.youtube.reconciliation import leer_progreso
+
+    assert leer_progreso("sin sesión consultable") is None
+    assert leer_progreso("") is None
+    assert leer_progreso("no-es-un-numero/4096 bytes recibidos") is None
+
+
+def test_el_progreso_anunciado_es_el_que_el_proveedor_informo():
+    run_id = uuid4()
+    from app.adapters.youtube.reconciliation import leer_progreso
+
+    resultado = reconciliar(
+        _peticion(
+            run_id=run_id,
+            sesion=_sesion(run_id, MULTIPLO_FRAGMENTO),
+            last_known_bytes=MULTIPLO_FRAGMENTO,
+        ),
+        transporte=TransporteFalso(guion=[incompleto(MULTIPLO_FRAGMENTO * 2)]),
+    )
+    assert leer_progreso(resultado.observed_state) == MULTIPLO_FRAGMENTO * 2

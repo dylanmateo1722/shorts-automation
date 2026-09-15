@@ -65,7 +65,7 @@ from app.core.errors import (
     ErrorTransitorio,
 )
 from app.adapters.youtube.auth import AutorizacionInvalida, TokenAcceso
-from app.adapters.youtube.reconciliation import reconciliar
+from app.adapters.youtube.reconciliation import leer_progreso, reconciliar
 from app.adapters.youtube.upload import (
     TAMANO_FRAGMENTO_BYTES,
     TIMEOUT_POR_DEFECTO_S,
@@ -564,13 +564,11 @@ def _sincronizar(
     sesion: UploadSession, resultado: ReconciliationResult
 ) -> UploadSession:
     """Pone la sesión al día con los bytes que el proveedor dio por recibidos."""
-    observado = resultado.observed_state
-    confirmados = sesion.bytes_confirmed
-    if "/" in observado:
-        try:
-            confirmados = int(observado.split("/", 1)[0].strip())
-        except ValueError:  # pragma: no cover - defensivo
-            pass
+    anunciados = leer_progreso(resultado.observed_state)
+    # Si el texto no anunciaba progreso, se conserva lo que la sesión ya daba por
+    # confirmado: retroceder el offset reenviaría bytes y adelantarlo dejaría un
+    # hueco, y las dos cosas rompen la subida.
+    confirmados = sesion.bytes_confirmed if anunciados is None else anunciados
     datos = sesion.model_dump()
     datos["session_url"] = sesion.session_url
     datos["bytes_confirmed"] = max(confirmados, 0)

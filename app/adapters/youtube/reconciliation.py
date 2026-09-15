@@ -64,6 +64,35 @@ MOTIVOS_CON_RIESGO_DE_DUPLICADO = frozenset(
 )
 
 
+#: Formato de ``observed_state`` cuando informa progreso. Lo escriben y lo leen
+#: ``formatear_progreso`` y ``leer_progreso``, que existen para que el
+#: acoplamiento entre este módulo y el publisher sea explícito: sin ellas,
+#: cambiar el texto de un lado rompería silenciosamente al otro.
+PLANTILLA_PROGRESO = "{confirmados}/{total} bytes recibidos"
+
+
+def formatear_progreso(confirmados: int, total: int) -> str:
+    """El ``observed_state`` de un progreso parcial."""
+    return PLANTILLA_PROGRESO.format(confirmados=confirmados, total=total)
+
+
+def leer_progreso(observed_state: str) -> int | None:
+    """Los bytes confirmados que anunciaba un ``observed_state``, si los trae.
+
+    Devuelve ``None`` cuando el texto no es un progreso, en vez de adivinar: un
+    número inventado aquí haría que el publisher reanudara desde el offset
+    equivocado.
+    """
+    cabeza, separador, _ = observed_state.partition("/")
+    if not separador:
+        return None
+    try:
+        valor = int(cabeza.strip())
+    except ValueError:
+        return None
+    return valor if valor >= 0 else None
+
+
 def _resultado(
     peticion: ReconciliationRequest,
     desenlace: DesenlaceReconciliacion,
@@ -205,7 +234,7 @@ def reconciliar(
         peticion,
         DesenlaceReconciliacion.subida_en_curso,
         ConfianzaReconciliacion.provider_parcial,
-        observado=f"{estado.bytes_confirmed}/{sesion.total_bytes} bytes recibidos",
+        observado=formatear_progreso(estado.bytes_confirmed, sesion.total_bytes),
         evidencia=[
             "el proveedor informa progreso parcial sobre una sesión viva; se "
             "puede continuar esa misma sesión",
