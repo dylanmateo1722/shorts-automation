@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de privacidad — Shorts Foundry</title>
+<meta name="description" content="Política de privacidad de Shorts Foundry: qué datos trata el sitio, qué datos trata el software, cómo se custodian las credenciales OAuth y cómo se usan las APIs de Google y YouTube.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<a class="skip" href="#contenido">Saltar al contenido</a>
+
+<header class="masthead">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <svg width="22" height="22" viewBox="0 0 22 22" role="img" aria-label="">
+        <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square">
+          <path d="M3 3.5h16"></path>
+          <path d="M5.5 8h11"></path>
+          <path d="M8 12.5h6"></path>
+          <path d="M9.5 18.5h3"></path>
+        </g>
+      </svg>
+      Shorts Foundry
+    </a>
+    <nav aria-label="Principal">
+      <a href="/privacy/" aria-current="page">Privacidad</a>
+      <a href="/terms/">Términos</a>
+    </nav>
+  </div>
+</header>
+
+<main id="contenido">
+
+  <div class="wrap hero">
+    <p class="eyebrow">Documento</p>
+    <h1>Política de privacidad</h1>
+    <p class="updated">Última actualización: 15 de septiembre de 2026</p>
+  </div>
+
+  <div class="wrap">
+    <nav class="toc" aria-labelledby="indice">
+      <h2 id="indice">Contenido</h2>
+      <ol>
+        <li><a href="#alcance">Alcance de esta política</a></li>
+        <li><a href="#sitio">Este sitio web</a></li>
+        <li><a href="#software">Datos que trata el software</a></li>
+        <li><a href="#credenciales">Credenciales OAuth y token de actualización</a></li>
+        <li><a href="#google">Uso de las APIs de Google y de YouTube</a></li>
+        <li><a href="#almacenamiento">Almacenamiento y conservación</a></li>
+        <li><a href="#seguridad">Seguridad</a></li>
+        <li><a href="#terceros">Terceros</a></li>
+        <li><a href="#derechos">Derechos y contacto</a></li>
+        <li><a href="#cambios">Cambios en esta política y en las de Google</a></li>
+      </ol>
+    </nav>
+  </div>
+
+  <section class="wrap" aria-labelledby="alcance">
+    <h2 id="alcance">1. Alcance de esta política</h2>
+    <p>
+      Esta política cubre dos cosas distintas, y conviene separarlas desde el
+      principio porque el tratamiento de datos es muy diferente en cada una:
+    </p>
+    <ul class="ticks">
+      <li><b>Este sitio web</b>, que es estático e informativo.</li>
+      <li><b>El software Shorts Automation</b>, que se ejecuta en la infraestructura de quien lo opera, no en este sitio.</li>
+    </ul>
+    <p>
+      Este sitio no es una aplicación con cuentas de usuario. No hay registro, no
+      hay inicio de sesión, no hay formularios y no se recogen datos personales a
+      través de él.
+    </p>
+    <div class="callout">
+      <p>
+        El software se ejecuta localmente o en la infraestructura que elija quien lo
+        opere. Los datos que procesa permanecen en ese entorno. Este sitio web no
+        recibe, no almacena y no tiene acceso a ninguno de esos datos.
+      </p>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="sitio">
+    <h2 id="sitio">2. Este sitio web</h2>
+    <p>El sitio se sirve como HTML y CSS estáticos. En concreto:</p>
+    <ul class="ticks">
+      <li><b>No utiliza cookies</b> ni almacenamiento local en el navegador.</li>
+      <li><b>No incorpora analítica</b>, ni medición de audiencia, ni identificadores publicitarios, ni píxeles de seguimiento.</li>
+      <li><b>No ejecuta JavaScript.</b></li>
+      <li><b>No carga recursos externos</b>: ni tipografías, ni imágenes, ni scripts, ni hojas de estilo alojadas por terceros.</li>
+      <li><b>No incluye formularios</b> ni ningún otro mecanismo de envío de datos.</li>
+    </ul>
+    <p>
+      Como ocurre con cualquier servidor web, el proveedor de alojamiento estático
+      puede registrar datos técnicos inherentes a la conexión —dirección IP,
+      marca de tiempo, recurso solicitado, agente de usuario— con fines de
+      funcionamiento, seguridad y prevención de abuso. Ese registro lo realiza el
+      proveedor de alojamiento conforme a sus propias condiciones; el sitio no
+      añade ninguna recogida de datos por encima de eso, y este proyecto no
+      construye perfiles ni conserva registros propios de navegación.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="software">
+    <h2 id="software">3. Datos que trata el software</h2>
+    <p>
+      Cuando alguien ejecuta Shorts Automation, el sistema trata únicamente los
+      datos técnicos necesarios para producir el vídeo y para dejar constancia
+      auditable de cómo se produjo:
+    </p>
+    <ul class="ticks">
+      <li><b>Material de entrada declarado por quien opera</b>: archivos de audio, vídeo, imagen o texto que esa persona aporta o señala.</li>
+      <li><b>Texto derivado del proceso</b>: transcripción, traducción, guion adaptado y subtítulos.</li>
+      <li><b>Artefactos generados</b>: narración sintetizada, capas gráficas propias y el vídeo final.</li>
+      <li><b>Metadatos de procedencia</b>: origen de cada recurso, referencia a la evidencia que lo respalda, decisión de licencia, quién la tomó y cuándo, y la huella criptográfica del archivo.</li>
+      <li><b>Registros técnicos de ejecución</b>: identificador de la corrida, etapas ejecutadas, duraciones medidas, errores y resultados de las comprobaciones de calidad.</li>
+    </ul>
+    <p>
+      Si quien opera el sistema introduce datos personales dentro del material que
+      procesa —por ejemplo, la voz o la imagen de una persona, o un texto que
+      identifique a alguien—, esos datos se tratarán como parte del material. La
+      responsabilidad de contar con la base adecuada para ese tratamiento
+      corresponde a quien lo introduce.
+    </p>
+    <p>
+      La evidencia de procedencia se registra como una <i>referencia</i>: un puntero
+      a dónde puede comprobarse. Si ese respaldo está detrás de una credencial, lo
+      que se guarda es el puntero, nunca la credencial.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="credenciales">
+    <h2 id="credenciales">4. Credenciales OAuth y token de actualización</h2>
+    <p>
+      Para la integración con YouTube, el sistema puede manejar credenciales OAuth:
+      identificador de cliente, secreto de cliente, un token de actualización
+      (<i>refresh token</i>) y los tokens de acceso de vida corta que se obtienen a
+      partir de él.
+    </p>
+    <div class="callout callout-stop">
+      <p>
+        <b>El token de actualización es información sensible.</b> No caduca por sí
+        solo: es válido hasta que se revoca, y por sí mismo permite acceder al canal
+        autorizado dentro del alcance concedido. Debe tratarse con el mismo cuidado
+        que una contraseña.
+      </p>
+    </div>
+    <p>Por eso las credenciales:</p>
+    <ul class="ticks">
+      <li><b>No se versionan.</b> Nunca entran en el repositorio ni en un commit.</li>
+      <li><b>No se escriben en los artefactos</b> que produce una corrida.</li>
+      <li><b>No se escriben en los registros</b>, ni en la salida de los comandos, ni en los mensajes de error.</li>
+      <li><b>Se aportan por el entorno</b>, mediante variables de entorno o el mecanismo de secretos de la plataforma donde se ejecuten, y se custodian fuera del código.</li>
+    </ul>
+    <p>
+      El sistema aplica varias barreras superpuestas para que esto se cumpla aunque
+      alguien se equivoque: los valores sensibles no se exponen en la
+      representación de los objetos que los contienen; el cuerpo de una respuesta
+      de error no se propaga, porque podría repetir lo que se envió; y un
+      componente de redacción enmascara los valores cuyo nombre sugiere que son un
+      token o un secreto, así como los que tienen la forma reconocible de un token
+      de actualización de Google. Hay pruebas automatizadas que recorren registros,
+      salidas y objetos serializados buscando credenciales de prueba.
+    </p>
+    <p>
+      Ninguno de los contratos de publicación del sistema tiene un campo donde
+      pudiera guardarse un token, y existe una prueba que lo verifica.
+    </p>
+    <p>
+      Quien opera el sistema puede revocar en cualquier momento el acceso concedido
+      desde la configuración de seguridad de su propia cuenta de Google. Revocado
+      el permiso, el token de actualización deja de ser válido.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="google">
+    <h2 id="google">5. Uso de las APIs de Google y de YouTube</h2>
+    <p>
+      Cuando la integración se utiliza, el sistema se comunica con los servicios de
+      autorización de Google y con la API de YouTube. A fecha de esta política, esa
+      comunicación se limita a:
+    </p>
+    <ul class="ticks">
+      <li>canjear el token de actualización por un token de acceso de vida corta;</li>
+      <li>leer la identidad del canal autorizado, para comprobar que coincide con el canal esperado.</li>
+    </ul>
+    <p>
+      El alcance solicitado es el mínimo necesario para el propósito del proyecto.
+      El flujo de autorización por dispositivo —pensado para quien no dispone de un
+      navegador en la misma máquina— admite un conjunto cerrado de alcances y
+      obliga a solicitar uno más amplio que el del flujo ordinario; esa diferencia
+      está acotada a ese flujo concreto.
+    </p>
+    <p>
+      La información del canal que se obtiene se usa exclusivamente para esa
+      verificación. No se comparte con terceros, no se utiliza con fines
+      publicitarios y no se emplea para elaborar perfiles.
+    </p>
+    <p>
+      El uso de los servicios de Google y de YouTube está sujeto además a las
+      condiciones y políticas de privacidad de Google, que son ajenas a este
+      proyecto y prevalecen en lo que a esos servicios respecta.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="almacenamiento">
+    <h2 id="almacenamiento">6. Almacenamiento y conservación</h2>
+    <p>
+      Los artefactos de una corrida —material intermedio, subtítulos, narración,
+      vídeo final, registro de procedencia e informes— se escriben en el sistema de
+      archivos del entorno donde se ejecuta el software, dentro del directorio de
+      trabajo de esa corrida.
+    </p>
+    <p>
+      Este proyecto no opera ningún servicio central de almacenamiento, ninguna base
+      de datos alojada y ningún servidor que reciba los datos de quien lo utiliza.
+      No hay transmisión de material a infraestructura de este proyecto, sencillamente
+      porque no existe tal infraestructura.
+    </p>
+    <p>
+      La conservación y la eliminación de esos archivos dependen enteramente de quien
+      opera el sistema: están en su máquina o en la infraestructura que haya
+      elegido, y puede borrarlos cuando quiera.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="seguridad">
+    <h2 id="seguridad">7. Seguridad</h2>
+    <p>
+      Las medidas técnicas descritas en esta política —la exclusión de credenciales
+      del repositorio, de los registros y de los artefactos; la redacción de valores
+      sensibles; la verificación de integridad de los archivos mediante huella
+      criptográfica— están implementadas en el código y cubiertas por pruebas
+      automatizadas.
+    </p>
+    <p>
+      Dicho esto, ninguna medida ofrece seguridad absoluta. La protección efectiva
+      depende también del entorno donde se ejecute el software y de las prácticas de
+      quien lo opera: la custodia de sus credenciales, el control de acceso a su
+      máquina y la configuración de los secretos en su plataforma de integración
+      continua son responsabilidad suya.
+    </p>
+    <p>
+      Si se detecta un problema de seguridad en el proyecto, puede comunicarse a la
+      dirección de contacto indicada más abajo.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="terceros">
+    <h2 id="terceros">8. Terceros</h2>
+    <p>
+      Este proyecto no vende, alquila ni cede datos a terceros, y no incorpora
+      ninguna herramienta de terceros en este sitio web.
+    </p>
+    <p>
+      El software, en cambio, puede comunicarse con servicios externos cuando quien
+      lo opera así lo configura: los servicios de Google y YouTube descritos en el
+      apartado 5, y los proveedores de modelo de lenguaje o de síntesis de voz que
+      esa persona elija. La elección de esos proveedores, las credenciales
+      utilizadas y las condiciones aplicables corresponden a quien opera el sistema.
+      Este proyecto no impone ninguno ni actúa como intermediario.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="derechos">
+    <h2 id="derechos">9. Derechos y contacto</h2>
+    <p>
+      Dado que este sitio no recoge datos personales y que este proyecto no aloja
+      datos de quienes usan el software, las solicitudes de acceso, rectificación,
+      supresión, limitación, oposición o portabilidad relativas al material
+      procesado deben dirigirse a quien opera la instalación correspondiente, que es
+      quien decide sobre ese tratamiento y quien tiene acceso a los datos.
+    </p>
+    <p>
+      Para cualquier consulta sobre esta política, sobre el proyecto o sobre un
+      posible problema de seguridad:
+    </p>
+    <p><span class="placeholder">SUPPORT_EMAIL_PENDIENTE</span></p>
+    <p>
+      Las consultas se atienden en la medida de las posibilidades de un proyecto en
+      desarrollo; no se ofrece un compromiso de plazo de respuesta.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="cambios">
+    <h2 id="cambios">10. Cambios en esta política y en las de Google</h2>
+    <p>
+      Esta política puede cambiar a medida que el proyecto avance. Las
+      modificaciones se publicarán en esta misma dirección y la fecha de
+      actualización que figura al comienzo reflejará la última revisión.
+    </p>
+    <p>
+      Conviene tener presentes dos circunstancias que no dependen de este proyecto:
+    </p>
+    <ul class="ticks">
+      <li>
+        <b>Las políticas, condiciones y requisitos de Google y de YouTube pueden
+        cambiar en cualquier momento</b>, incluidos los relativos a alcances de
+        autorización, verificación de aplicaciones y tratamiento de datos. Cuando
+        eso ocurra, prevalecerán sus términos y este proyecto se ajustará a ellos.
+      </li>
+      <li>
+        <b>El comportamiento del flujo OAuth puede depender del estado de
+        publicación y verificación de la aplicación</b> en la plataforma de Google.
+        Según ese estado pueden variar, entre otras cosas, las pantallas de
+        consentimiento que se muestran, las advertencias que aparecen, la
+        disponibilidad de determinados alcances y la vigencia de las autorizaciones
+        concedidas. Esas condiciones las fija Google.
+      </li>
+    </ul>
+  </section>
+
+</main>
+
+<footer class="colophon">
+  <div class="wrap">
+    <nav aria-label="Pie de página">
+      <a href="/">Inicio</a>
+      <a href="/privacy/">Política de privacidad</a>
+      <a href="/terms/">Términos de uso</a>
+    </nav>
+    <p>
+      Contacto: <span class="placeholder">SUPPORT_EMAIL_PENDIENTE</span>
+    </p>
+    <p>
+      Shorts Foundry es un proyecto independiente. No está afiliado, patrocinado ni
+      respaldado por Google ni por YouTube.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

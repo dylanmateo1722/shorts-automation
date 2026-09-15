@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shorts Foundry — infraestructura de localización y adaptación de Shorts</title>
+<meta name="description" content="Shorts Foundry es una infraestructura de automatización para localizar y adaptar Shorts: transcripción, traducción, narración, subtítulos, elementos originales, renderizado, controles de procedencia y QA técnica.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<a class="skip" href="#contenido">Saltar al contenido</a>
+
+<header class="masthead">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <svg width="22" height="22" viewBox="0 0 22 22" role="img" aria-label="">
+        <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square">
+          <path d="M3 3.5h16"></path>
+          <path d="M5.5 8h11"></path>
+          <path d="M8 12.5h6"></path>
+          <path d="M9.5 18.5h3"></path>
+        </g>
+      </svg>
+      Shorts Foundry
+    </a>
+    <nav aria-label="Principal">
+      <a href="/privacy/">Privacidad</a>
+      <a href="/terms/">Términos</a>
+    </nav>
+  </div>
+</header>
+
+<main id="contenido">
+
+  <div class="wrap hero">
+    <p class="eyebrow">Proyecto técnico · Shorts Automation</p>
+    <h1>Infraestructura para localizar y adaptar Shorts</h1>
+    <p class="lede">
+      Shorts Foundry es el sitio informativo oficial de <b>Shorts Automation</b>, un
+      orquestador que produce vídeo vertical a partir de un guion adaptado: transcribe,
+      traduce, narra, subtitula, compone elementos propios y renderiza, con controles
+      de procedencia y QA técnica en cada paso.
+    </p>
+    <p>
+      Esta página describe qué hace el sistema y, con el mismo detalle, qué
+      <b>no</b> hace. El proyecto está en desarrollo y su estado por fases se publica
+      más abajo sin redondear.
+    </p>
+  </div>
+
+  <section class="wrap" aria-labelledby="que-es">
+    <h2 id="que-es">Qué es</h2>
+    <p>
+      Una cadena de producción automatizada, pensada para operarse sobre material
+      propio o sobre material cuya procedencia esté documentada. El sistema no busca
+      contenido, no descarga contenido de terceros y no decide por su cuenta qué
+      puede usarse: todo recurso entra porque alguien lo declara, y entra con una
+      decisión de licencia explícita asociada.
+    </p>
+
+    <h3>Las etapas del pipeline</h3>
+    <ol class="stages">
+      <li><b>Transcripción</b><span>El texto de partida se obtiene del material declarado como fuente.</span></li>
+      <li><b>Traducción y adaptación editorial</b><span>Paso al español con validaciones objetivas sobre el texto: no puntúan calidad editorial.</span></li>
+      <li><b>Narración</b><span>Síntesis de voz a través de una interfaz de proveedor; la duración se mide sobre el archivo generado, nunca se estima.</span></li>
+      <li><b>Subtítulos</b><span>Alineación por palabra, segmentación bajo reglas explícitas y serialización a SRT y ASS.</span></li>
+      <li><b>Elementos originales</b><span>Rótulos y capas propias generadas por el pipeline, registradas como recursos con su propia procedencia.</span></li>
+      <li><b>Controles de procedencia</b><span>Cada recurso lleva fuente, evidencia y decisión de licencia. La puerta se aplica antes de invocar el motor de render.</span></li>
+      <li><b>Renderizado</b><span>Composición a vídeo vertical 1080×1920, H.264 y AAC.</span></li>
+      <li><b>QA técnica</b><span>Las propiedades del archivo final se leen del archivo, no se dan por buenas porque se configuraran.</span></li>
+      <li><b>Integración con YouTube</b><span>En desarrollo. Hoy alcanza a la autenticación; ver la sección correspondiente.</span></li>
+    </ol>
+  </section>
+
+  <section class="wrap" aria-labelledby="que-no-es">
+    <h2 id="que-no-es">Qué no es</h2>
+    <p>Para evitar cualquier malentendido sobre el propósito del proyecto:</p>
+    <ul class="nots">
+      <li><b>No es una herramienta para evadir Content ID</b> ni ningún otro sistema de detección de derechos de autor. No existe puntuación de similitud, porcentaje de transformación ni umbral de diferencia; esos conceptos no están en el sistema.</li>
+      <li><b>No es una herramienta para copiar o republicar Shorts ajenos.</b> Conocer la dirección de un vídeo de un tercero no autoriza a renderizarlo, y ninguna base de procedencia convierte esa dirección en material utilizable.</li>
+      <li><b>No garantiza monetización.</b> Nada en el sistema determina si una pieza es monetizable.</li>
+      <li><b>No garantiza la ausencia de reclamaciones, retiradas o avisos.</b> El sistema no puede anticipar ni impedir decisiones de una plataforma o de un titular de derechos.</li>
+      <li><b>No convierte contenido ajeno en contenido legal.</b> No existe un evaluador automático de uso legítimo, y ningún procesamiento técnico transforma por sí solo la situación jurídica de un material.</li>
+    </ul>
+    <p>
+      El sistema aplica una política técnica. La valoración jurídica y editorial es
+      humana, se mantiene deliberadamente separada y su estado inicial es
+      «no evaluado».
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="procedencia">
+    <h2 id="procedencia">Procedencia: qué puede entrar al render</h2>
+    <p>
+      Cada recurso se registra con su origen, la evidencia que lo respalda y una
+      decisión de licencia explícita. Esa decisión determina si el recurso puede
+      llegar al render, y la restricción es estructural: el registro de procedencia
+      se niega a validar si entre el material de render aparece algo sin fuente
+      declarada, sin decisión, o con una decisión que no lo autorice.
+    </p>
+
+    <div class="table-scroll">
+      <table>
+        <caption>Clasificación de una fuente y su efecto sobre el render</caption>
+        <thead>
+          <tr><th scope="col">Clase</th><th scope="col">Qué significa</th><th scope="col">¿Entra al render?</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><span class="tag tag-ok">RENDER_ALLOWED</span></th>
+            <td>Hay una base de procedencia aceptada y la evidencia que la política exige para ella.</td>
+            <td>Sí</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tag tag-none">REFERENCE_ONLY</span></th>
+            <td>Se consultó para investigar, analizar o documentarse.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tag tag-warn">NEEDS_REVIEW</span></th>
+            <td>Falta información para poder decidir.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tag tag-stop">BLOCKED</span></th>
+            <td>Se decidió que no.</td>
+            <td>No</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>REFERENCE_ONLY</h3>
+    <p>
+      Una fuente de referencia puede informar el análisis, el tema, la transcripción,
+      la traducción y el guion adaptado. Lo que no puede ser es fuente de vídeo, de
+      imagen o de audio, ni material de render, ni entrada del motor, ni salida
+      final. El nombre de un archivo no cambia nada: si su procedencia dice que es
+      de referencia, queda bloqueado.
+    </p>
+    <p>
+      No hay promoción automática. Pasar de referencia a material utilizable exige
+      una decisión nueva, con su base y su evidencia.
+    </p>
+
+    <h3>RENDER_ALLOWED</h3>
+    <p>
+      Depende de una base de procedencia adecuada y de la evidencia que esa base
+      requiere. Una afirmación sin respaldo no basta, y las bases que no pueden
+      sostenerse por sí solas —origen desconocido, o una alegación de uso legítimo—
+      terminan siempre en revisión, nunca en autorización.
+    </p>
+
+    <div class="callout callout-stop">
+      <h3>RENDER_ALLOWED no significa LEGAL_CERTIFIED</h3>
+      <p>
+        Que un recurso esté marcado como utilizable significa <b>exactamente</b> que
+        la procedencia registrada y la evidencia disponible satisfacen la política
+        técnica de este sistema.
+      </p>
+      <p>No significa ninguna de estas cosas:</p>
+      <ul class="nots">
+        <li>que exista garantía legal de nada;</li>
+        <li>que no vaya a haber reclamaciones de derechos de autor;</li>
+        <li>que no vaya a activarse Content ID;</li>
+        <li>que la pieza sea monetizable;</li>
+        <li>que esto constituya asesoramiento jurídico.</li>
+      </ul>
+      <p>
+        La decisión técnica y el juicio editorial y legal viven en sitios distintos
+        a propósito. El segundo no se automatiza y solo una persona puede
+        pronunciarlo.
+      </p>
+    </div>
+
+    <h3>La procedencia se registra, no se verifica</h3>
+    <p>
+      Que un recurso declare una licencia determinada no significa que alguien haya
+      auditado esa licencia: el registro apunta a una evidencia que una persona debe
+      comprobar. Lo que sí es automático es el bloqueo del material de referencia y
+      la comprobación de integridad del archivo.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="qa">
+    <h2 id="qa">QA técnica y juicio editorial</h2>
+    <p>
+      La QA técnica comprueba propiedades objetivas y verificables: que las capas se
+      compusieron, que el archivo final tiene las características esperadas, que la
+      duración medida se corresponde con la narración. Es una comprobación de
+      ingeniería.
+    </p>
+    <p>
+      La validación visual es parcial por diseño: la automatización puede afirmar
+      que una capa se compuso, pero que un subtítulo o un rótulo <i>se lean bien</i>
+      exige mirar los fotogramas. Los informes lo advierten siempre.
+    </p>
+    <p>
+      Que los elementos de transformación queden registrados no implica que una
+      pieza sea jurídicamente transformativa, ni que sea publicable, ni que sea
+      monetizable. Son planos distintos y el sistema no los mezcla.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="youtube">
+    <h2 id="youtube">Integración con YouTube</h2>
+    <p>
+      La integración con YouTube es una <b>capacidad del proyecto en desarrollo</b>.
+      Conviene ser preciso sobre en qué punto está, porque la diferencia importa.
+    </p>
+    <div class="panel">
+      <h3>Implementado</h3>
+      <ul class="ticks">
+        <li>Autenticación mediante OAuth con la cuenta de Google que administre el canal.</li>
+        <li>Lectura de qué canal quedó autorizado, para compararlo con el canal esperado.</li>
+        <li>Los contratos y la máquina de estados que describen una publicación: qué se quiere publicar, por dónde va una ejecución y qué respondió la plataforma.</li>
+      </ul>
+      <h3>No implementado</h3>
+      <ul class="nots">
+        <li>Subida de vídeos. No existe la llamada de inserción, ni un componente publicador.</li>
+        <li>Publicación automática, programación de publicaciones y política de reintentos.</li>
+        <li>Descubrimiento de contenido, analítica y gestión de varios canales.</li>
+      </ul>
+    </div>
+    <div class="callout">
+      <p>
+        <b>Autenticar no es publicar.</b> Hoy el sistema sabe identificarse frente a
+        YouTube y decir de qué canal es la autorización. No sube nada. Este sitio no
+        publica contenido de forma automática, y no afirmará lo contrario mientras
+        esa capacidad no esté implementada y validada en producción.
+      </p>
+    </div>
+    <p>
+      El consentimiento OAuth lo da una persona, de forma manual y puntual. No se
+      automatiza, y eso es deliberado.
+    </p>
+  </section>
+
+  <section class="wrap" aria-labelledby="estado">
+    <h2 id="estado">Estado del proyecto</h2>
+    <p>
+      El desarrollo avanza por fases cerradas. Una fase se da por buena cuando sus
+      contratos, sus pruebas y su documentación están completos.
+    </p>
+    <div class="table-scroll">
+      <table>
+        <caption>Fases del desarrollo y su estado</caption>
+        <thead>
+          <tr><th scope="col">Fase</th><th scope="col">Contenido</th><th scope="col">Estado</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">0 – 0.5</th><td>Auditoría del motor de render y prueba de concepto del pipeline</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">1</th><td>Contratos, trazabilidad de corridas y pipeline mínimo</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">2</th><td>Traducción y adaptación editorial</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">3</th><td>Narración, alineación y subtítulos</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">4</th><td>Procedencia, transformación editorial y QA técnica</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">5</th><td>Render de extremo a extremo hasta el archivo final</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">6</th><td>Fuentes, evidencia y decisiones de licencia</td><td><span class="tag tag-ok">Aprobado</span></td></tr>
+          <tr><th scope="row">7.0</th><td>Publicación: contratos y máquina de estados</td><td><span class="tag tag-ok">Cerrado</span></td></tr>
+          <tr><th scope="row">7.1</th><td>Autenticación OAuth con YouTube y verificación del canal</td><td><span class="tag tag-warn">Implementado, sin aprobar</span></td></tr>
+          <tr><th scope="row">8 y siguientes</th><td>Publicación real y trabajo posterior</td><td><span class="tag tag-none">No iniciado</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="responsabilidad">
+    <h2 id="responsabilidad">Responsabilidad de quien lo usa</h2>
+    <p>
+      Shorts Foundry es infraestructura. Quien la opera decide qué material
+      introduce, bajo qué base lo declara y qué hace después con el resultado, y es
+      responsable de todo ello: de tener los derechos necesarios sobre lo que
+      procesa, de la exactitud de la procedencia que declara, y del cumplimiento de
+      las normas de cualquier plataforma donde publique.
+    </p>
+    <p>
+      Las comprobaciones automáticas del sistema son controles de ingeniería. No
+      sustituyen la revisión humana, ni el asesoramiento jurídico, ni la
+      responsabilidad de quien publica.
+    </p>
+  </section>
+
+</main>
+
+<footer class="colophon">
+  <div class="wrap">
+    <nav aria-label="Pie de página">
+      <a href="/">Inicio</a>
+      <a href="/privacy/">Política de privacidad</a>
+      <a href="/terms/">Términos de uso</a>
+    </nav>
+    <p>
+      Contacto: <span class="placeholder">SUPPORT_EMAIL_PENDIENTE</span>
+    </p>
+    <p>
+      Shorts Foundry es un proyecto independiente. No está afiliado, patrocinado ni
+      respaldado por Google, YouTube ni por ningún titular de derechos cuyo material
+      pueda ser procesado por quien opere el sistema. Las marcas y nombres
+      mencionados pertenecen a sus respectivos titulares.
+    </p>
+    <p>
+      Este sitio es estático e informativo: no usa cookies, no ejecuta JavaScript,
+      no incorpora analítica y no carga recursos de terceros.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
