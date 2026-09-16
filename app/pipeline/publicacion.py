@@ -163,9 +163,22 @@ def evaluar_precondiciones(
     # --- El archivo ---------------------------------------------------------
     ruta_relativa = None
     if render_result is not None:
-        # El vídeo final compuesto es el que se publica; el intermedio del motor
-        # no. Si no hay compuesto, se cae al de salida y se dice cuál se usó.
-        ruta_relativa = render_result.combined_path or render_result.output_path
+        # Lo que se publica es ``output_path``, y **solo** ``output_path``.
+        #
+        # En el artefacto de la etapa de composición —``final_video.json``, el
+        # que interesa aquí— los dos campos significan esto:
+        #
+        #   output_path    final/short.mp4   el vídeo compuesto, con subtítulos
+        #                                    y rótulo. Es el que se publica.
+        #   combined_path  render/final.mp4  el intermedio crudo del motor, que
+        #                                    queda referenciado para diagnosticar.
+        #
+        # ``sha256`` es la huella de ``output_path``, medida sobre el archivo
+        # compuesto. Preferir ``combined_path`` publicaría el vídeo sin
+        # subtítulos ni rótulo, y además su huella no cuadraría con la
+        # registrada. No hay caso en que el intermedio sea lo publicable, así
+        # que no hay respaldo: si no hay ``output_path``, no hay nada que subir.
+        ruta_relativa = render_result.output_path
     if render_result is not None and not ruta_relativa:
         motivos.append("el RenderResult no declara la ruta del vídeo")
 

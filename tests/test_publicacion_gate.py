@@ -38,23 +38,48 @@ from app.pipeline.publicacion import evaluar_precondiciones
 
 from conftest_g72 import TransporteFalso, metadata, token
 
-RUTA_VIDEO = "final_video.mp4"
+#: La forma **real** del artefacto que produce la etapa de composición. Los dos
+#: campos no son intercambiables y el fixture lo refleja:
+#:
+#:   output_path    el vídeo compuesto, con subtítulos y rótulo. Es el publicable.
+#:   combined_path  el intermedio crudo del motor, solo referenciado.
+#:
+#: El fixture anterior ponía el vídeo en ``combined_path`` y dejaba
+#: ``output_path`` vacío, así que reproducía la misma inversión que el gate
+#: tenía y por eso no podía detectarla.
+RUTA_VIDEO = "final/short.mp4"
+RUTA_INTERMEDIO = "render/final.mp4"
+
+#: Contenido distinto en cada archivo: si el gate cogiera el intermedio, su
+#: huella no coincidiría y el test lo diría.
+CONTENIDO_FINAL = b"MP4-final-compuesto-" * 64
+CONTENIDO_INTERMEDIO = b"MP4-intermedio-del-motor-" * 64
 
 
-def _escribir_video(directorio: Path, contenido: bytes = b"MP4-de-prueba" * 100) -> str:
+def _escribir_video(directorio: Path, contenido: bytes = CONTENIDO_FINAL) -> str:
+    """Escribe el compuesto **y** el intermedio, como hace una corrida real."""
     destino = directorio / RUTA_VIDEO
+    destino.parent.mkdir(parents=True, exist_ok=True)
     destino.write_bytes(contenido)
+
+    intermedio = directorio / RUTA_INTERMEDIO
+    intermedio.parent.mkdir(parents=True, exist_ok=True)
+    intermedio.write_bytes(CONTENIDO_INTERMEDIO)
+
     return hashlib.sha256(contenido).hexdigest()
 
 
 def _render(run_id, sha: str | None, *, status=EstadoRender.exito) -> RenderResult:
+    """Un ``RenderResult`` con la forma que escribe la etapa de composición."""
     return RenderResult(
         run_id=run_id,
         status=status,
         exit_code=0 if status is EstadoRender.exito else 1,
-        combined_path=RUTA_VIDEO,
+        output_path=RUTA_VIDEO,
+        combined_path=RUTA_INTERMEDIO,
+        # La huella registrada es la del compuesto, nunca la del intermedio.
         sha256=sha,
-        renderer="ffmpeg-composition",
+        renderer="ffmpeg-libass-burn-in",
     )
 
 
@@ -253,7 +278,9 @@ def test_mp4_inexistente_no_produce_ninguna_llamada(tmp_path):
 
 def test_mp4_vacio_no_esta_listo(tmp_path):
     run_id = uuid4()
-    (tmp_path / RUTA_VIDEO).write_bytes(b"")
+    destino = tmp_path / RUTA_VIDEO
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_bytes(b"")
     _, gate = _evaluar(tmp_path, run_id=run_id, sha=hashlib.sha256(b"").hexdigest())
     assert not gate.listo
     assert any("vacío" in m for m in gate.motivos)
@@ -453,3 +480,133 @@ def test_ningun_assert_protege_el_gate():
         for linea in inspect.getsource(modulo).splitlines():
             despojada = linea.strip()
             assert not despojada.startswith("assert "), f"{modulo.__name__}: {linea}"
+
+
+# ---------------------------------------------------------------------------
+# Regresión: qué archivo se publica (bugfix previo a G7.3)
+#
+# El gate prefería ``combined_path``, que en el artefacto real es el intermedio
+# crudo del motor: sin subtítulos, sin rótulo y con otra huella. Estos tests
+# fijan la semántica sobre la forma real del artefacto de composición.
+# ---------------------------------------------------------------------------
+
+
+def test_el_gate_elige_output_path_no_combined_path(tmp_path):
+    """Lo publicable es el compuesto, y el fixture los distingue por contenido."""
+    run_id = uuid4()
+    sha = _escribir_video(tmp_path)
+    _, gate = _evaluar(tmp_path, run_id=run_id, sha=sha)
+
+    assert gate.listo, gate.motivos
+    assert gate.video_path is not None
+    assert gate.video_path == tmp_path / RUTA_VIDEO
+    assert gate.video_path.name == "short.mp4"
+    assert "render" not in gate.video_path.parts, "se eligió el intermedio del motor"
+    assert gate.video_path.read_bytes() == CONTENIDO_FINAL
+
+
+def test_el_intermedio_del_motor_nunca_es_el_video_publicable(tmp_path):
+    """Aunque exista en disco y sea válido, no es lo que se sube."""
+    run_id = uuid4()
+    sha = _escribir_video(tmp_path)
+    _, gate = _evaluar(tmp_path, run_id=run_id, sha=sha)
+
+    intermedio = tmp_path / RUTA_INTERMEDIO
+    assert intermedio.is_file(), "el fixture debe tener los dos archivos"
+    assert gate.video_path != intermedio
+    assert gate.video_sha256 != hashlib.sha256(CONTENIDO_INTERMEDIO).hexdigest()
+
+
+def test_el_sha256_se_valida_contra_el_compuesto(tmp_path):
+    """La huella registrada es la del compuesto; el gate comprueba ese archivo."""
+    run_id = uuid4()
+    sha = _escribir_video(tmp_path)
+    _, gate = _evaluar(tmp_path, run_id=run_id, sha=sha)
+
+    assert gate.listo, gate.motivos
+    assert gate.video_sha256 == sha == hashlib.sha256(CONTENIDO_FINAL).hexdigest()
+    assert gate.total_bytes == len(CONTENIDO_FINAL)
+
+
+def test_la_huella_del_intermedio_no_sirve_para_pasar_el_gate(tmp_path):
+    """Si alguien registrara la huella del intermedio, el gate lo rechaza."""
+    run_id = uuid4()
+    _escribir_video(tmp_path)
+    sha_intermedio = hashlib.sha256(CONTENIDO_INTERMEDIO).hexdigest()
+    _, gate = _evaluar(tmp_path, run_id=run_id, sha=sha_intermedio)
+
+    assert not gate.listo
+    assert any("INTEGRITY_MISMATCH" in m for m in gate.motivos)
+
+
+def test_sin_output_path_no_hay_nada_que_publicar(tmp_path):
+    """El intermedio no es respaldo del compuesto: su ausencia bloquea."""
+    run_id = uuid4()
+    sha = _escribir_video(tmp_path)
+    solo_intermedio = RenderResult(
+        run_id=run_id,
+        status=EstadoRender.exito,
+        exit_code=0,
+        output_path=None,
+        combined_path=RUTA_INTERMEDIO,
+        sha256=sha,
+        renderer="ffmpeg-libass-burn-in",
+    )
+    _, gate = _evaluar(
+        tmp_path, run_id=run_id, sha=sha, render_result=solo_intermedio
+    )
+    assert not gate.listo
+    assert any("no declara la ruta" in m for m in gate.motivos)
+
+
+def test_el_publisher_sube_el_compuesto(tmp_path):
+    """De extremo a extremo: lo que viaja en los PUT es el archivo compuesto."""
+    from conftest_g72 import completado, sesion_abierta, video_remoto
+
+    run_id = uuid4()
+    sha = _escribir_video(tmp_path)
+    _, gate = _evaluar(tmp_path, run_id=run_id, sha=sha)
+    assert gate.listo, gate.motivos
+
+    transporte = TransporteFalso(
+        guion=[sesion_abierta(), completado(), video_remoto()]
+    )
+    publicar(
+        run_id=run_id,
+        metadata=metadata(run_id),
+        gate=gate,
+        token=token(),
+        transporte=transporte,
+    )
+
+    enviado = b"".join(
+        ll.cuerpo or b""
+        for ll in transporte.llamadas
+        if ll.metodo == "PUT" and ll.cuerpo
+    )
+    assert enviado == CONTENIDO_FINAL
+    assert CONTENIDO_INTERMEDIO not in enviado
+
+
+def test_el_comportamiento_seguro_no_se_rompe(tmp_path):
+    """Las demás puertas siguen cerrando: QA, procedencia e integridad."""
+    from app.contracts.models import ClaseFuente
+
+    run_id = uuid4()
+    sha = _escribir_video(tmp_path)
+
+    # QA reprobada
+    _, g = _evaluar(tmp_path, run_id=run_id, sha=sha, qa_result=_qa(run_id, ok=False))
+    assert not g.listo
+
+    # Procedencia que no autoriza
+    _, g = _evaluar(
+        tmp_path, run_id=run_id, sha=sha,
+        ledger=_ledger(run_id, clase=ClaseFuente.solo_referencia),
+    )
+    assert not g.listo
+
+    # Huella que no cuadra
+    _, g = _evaluar(tmp_path, run_id=run_id, sha="f" * 64)
+    assert not g.listo
+    assert any("INTEGRITY_MISMATCH" in m for m in g.motivos)
