@@ -1,0 +1,263 @@
+# Prueba de integración real de Gate 7.3: UNA subida privada a YouTube.
+#
+# Este workflow **sube un vídeo de verdad**. Por eso:
+#
+#   * solo se lanza a mano (`workflow_dispatch`), nunca por push, pull_request,
+#     schedule ni workflow_run;
+#   * exige teclear la palabra SUBIR, y aborta antes de tocar la red si no es
+#     exactamente esa;
+#   * no tiene reintento automático de ninguna clase. Si una ejecución acaba en
+#     NEEDS_REVIEW, lo que toca es mirar el canal a mano, no volver a lanzarla:
+#     puede haber un vídeo subido cuyo desenlace no se pudo confirmar.
+#
+# El vídeo se produce con el mismo pipeline E2E que CI ya ejecuta —motor y
+# FFmpeg reales, LLM y TTS falsos—, así que no hay material de terceros: el
+# visual es un degradado que genera el propio pipeline.
+#
+# Los secrets se exponen únicamente a los dos pasos que los necesitan. No se usa
+# `set -x` en ningún sitio y el entorno no se vuelca nunca.
+name: YouTube Publish Test (G7.3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacion:
+        description: 'Escribe SUBIR para confirmar que quieres subir un vídeo real y privado'
+        required: true
+        default: ''
+      target_duration:
+        description: 'Duración objetivo del vídeo de prueba, en segundos'
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Nunca dos subidas a la vez, y sin cancelar la que esté en curso: cancelarla
+  # a mitad dejaría exactamente la incertidumbre que este Gate evita.
+  group: youtube-publish-test
+  cancel-in-progress: false
+
+jobs:
+  publish-test:
+    name: Subida privada de prueba
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Confirmación explícita
+        env:
+          CONFIRMACION: ${{ inputs.confirmacion }}
+        run: |
+          if [ "$CONFIRMACION" != "SUBIR" ]; then
+            echo "::error::La confirmación no es 'SUBIR'. No se ejecuta nada."
+            echo "Este workflow sube un vídeo real a YouTube y exige confirmación literal."
+            exit 1
+          fi
+          echo "Confirmado. Se subirá UN vídeo privado de prueba."
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements.txt
+
+      - name: Inicializar el motor de render
+        run: ./scripts/setup_mpt.sh
+
+      # El preflight corre ANTES de gastar minutos produciendo un vídeo: si la
+      # autorización no sirve, cuanto antes se sepa, mejor.
+      - name: Preflight OAuth
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          EXPECTED_YOUTUBE_CHANNEL_ID: ${{ secrets.EXPECTED_YOUTUBE_CHANNEL_ID }}
+        run: |
+          set +x
+          .venv/bin/python -m app youtube-auth > /tmp/auth.json || {
+            echo "::error::El AUTH CHECK falló. No se produce vídeo ni se sube nada."
+            cat /tmp/auth.json || true
+            exit 1
+          }
+          cat /tmp/auth.json
+
+          .venv/bin/python - <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          REQUERIDO = "https://www.googleapis.com/auth/youtube"
+          datos = json.loads(Path("/tmp/auth.json").read_text(encoding="utf-8"))
+
+          if datos["result"] != "AUTHENTICATED" or not datos["correct_channel"]:
+              print(f"::error::AUTH CHECK no utilizable: {datos['result']}")
+              sys.exit(1)
+
+          # Igualdad exacta sobre la lista, no subcadena: ".../youtube.upload"
+          # contiene ".../youtube" como texto y NO es el mismo alcance.
+          concedidos = (datos.get("scope_granted") or "").split()
+          if REQUERIDO not in concedidos:
+              print(f"::error::El alcance concedido no incluye {REQUERIDO}.")
+              print(f"Concedidos: {concedidos or '(ninguno declarado)'}")
+              print("No se intenta ninguna subida. Reautorizar es una decisión aparte.")
+              sys.exit(1)
+
+          print(f"Alcance {REQUERIDO}: concedido")
+          print("Preflight: PASS")
+          PY
+
+      # Mismo E2E que el job `integration` de CI: motor y FFmpeg reales.
+      - name: Producir el vídeo de prueba con el pipeline real
+        id: e2e
+        env:
+          LLM_PROVIDER: fake
+          LLM_MODEL: fake-1
+          LLM_FAKE_RESPONSES: tests/fixtures/respuestas/estudio_atencion.json
+          TTS_PROVIDER: fake
+          TTS_VOICE: es-CR-JuanNeural
+          TARGET_DURATION: ${{ inputs.target_duration }}
+        run: |
+          RUN_ID=$(.venv/bin/python -c "import uuid;print(uuid.uuid4())")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "RUN_ID de esta prueba: $RUN_ID"
+
+          .venv/bin/python -m app run \
+            --pipeline e2e \
+            --transcript tests/fixtures/transcripts/estudio_atencion.json \
+            --target-duration "$TARGET_DURATION" \
+            --run-id "$RUN_ID"
+          .venv/bin/python -m app validate "$RUN_ID" --pipeline e2e
+
+          test -s "runs/$RUN_ID/final/short.mp4"
+          test -s "runs/$RUN_ID/final_video.json"
+          test -s "runs/$RUN_ID/final_video_qa.json"
+          test -s "runs/$RUN_ID/provenance_ledger.json"
+
+          TAMANO=$(stat -c%s "runs/$RUN_ID/final/short.mp4")
+          echo "Vídeo compuesto: $TAMANO bytes"
+          sha256sum "runs/$RUN_ID/final/short.mp4"
+
+          # Con fragmentos de 256 KiB hacen falta más de 256 KiB para que la
+          # prueba del resumable produzca al menos dos PUT de datos.
+          if [ "$TAMANO" -le 262144 ]; then
+            echo "::error::El vídeo mide $TAMANO bytes y no produciría dos fragmentos."
+            exit 1
+          fi
+
+      # El único paso que sube. Los secrets viven aquí y en el preflight, en
+      # ningún otro sitio.
+      - name: Publicar (una sola subida, privada)
+        id: publicar
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          EXPECTED_YOUTUBE_CHANNEL_ID: ${{ secrets.EXPECTED_YOUTUBE_CHANNEL_ID }}
+          RUN_ID: ${{ steps.e2e.outputs.run_id }}
+        run: |
+          set +x
+          .venv/bin/python scripts/g7_3_publish_test.py "$RUN_ID" \
+            --runs-dir runs \
+            --output g7_3_artifacts
+
+      - name: Comprobar los criterios de aceptación
+        if: always()
+        env:
+          RUN_ID: ${{ steps.e2e.outputs.run_id }}
+        run: |
+          set +x
+          test -f g7_3_artifacts/g7_3_report.json || {
+            echo "::error::No hay informe: la prueba no llegó a producirlo."
+            exit 1
+          }
+          cat g7_3_artifacts/g7_3_report.json
+
+          .venv/bin/python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+
+          informe = json.loads(
+              Path("g7_3_artifacts/g7_3_report.json").read_text(encoding="utf-8")
+          )
+          fallos = []
+
+          def exigir(condicion, etiqueta):
+              print(f"  [{'OK  ' if condicion else 'FALLA'}] {etiqueta}")
+              if not condicion:
+                  fallos.append(etiqueta)
+
+          transporte = informe.get("transport") or {}
+          resultado = informe.get("result") or {}
+
+          exigir(informe.get("status") == "COMPLETED", "L. PublishJob en COMPLETED")
+          exigir(transporte.get("session_post_count") == 1,
+                 "N. exactamente un POST de creación de sesión")
+          exigir((transporte.get("chunk_put_count") or 0) >= 2,
+                 "E. al menos dos fragmentos PUT")
+          exigir(bool(resultado.get("video_id")), "F/M. hay video_id real")
+          exigir(resultado.get("privacy_status") == "private",
+                 "J/P. privacidad observada = private")
+          exigir(resultado.get("status") == "COMPLETED", "PublishResult COMPLETED")
+          exigir(informe.get("preflight", {}).get("scope_ok") is True,
+                 "B. alcance requerido concedido")
+          exigir(str(os.environ.get("RUN_ID", "")) == informe.get("run_id"),
+                 "Q. el informe corresponde a esta corrida")
+
+          # O. ningún secreto en los artifacts.
+          for archivo in Path("g7_3_artifacts").glob("*.json"):
+              texto = archivo.read_text(encoding="utf-8").lower()
+              for prohibido in ("refresh_token", "client_secret", "access_token",
+                                "bearer ", "ya29.", "session_url", "upload_id"):
+                  if prohibido in texto:
+                      fallos.append(f"O. {archivo.name} contiene {prohibido!r}")
+          exigir(not [f for f in fallos if f.startswith("O.")],
+                 "O. sin secretos en los artifacts")
+
+          if resultado.get("video_id"):
+              print()
+              print(f"VÍDEO SUBIDO (privado): {resultado['video_id']}")
+              print(f"URL: {resultado.get('url')}")
+              print("Recuerda eliminarlo a mano cuando termines de revisarlo.")
+
+          if fallos:
+              print()
+              for f in fallos:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          print()
+          print("Todos los criterios comprobables automáticamente: PASS")
+          PY
+
+      - name: Publicar los artefactos saneados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g7-3-publish-test
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            g7_3_artifacts/*.json
+
+      - name: Aviso si quedó pendiente de revisión
+        if: failure()
+        run: |
+          echo "::warning::Si el estado fue NEEDS_REVIEW, puede existir un vídeo"
+          echo "::warning::subido sin confirmar. Revisa el canal A MANO."
+          echo "::warning::NO vuelvas a lanzar este workflow sin haberlo hecho:"
+          echo "::warning::una segunda ejecución podría duplicar la subida."
