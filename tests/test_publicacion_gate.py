@@ -27,6 +27,7 @@ from app.contracts.models import (
     NivelQA,
     ProvenanceLedger,
     QAResult,
+    RenderJob,
     RenderResult,
     SourceAsset,
     TipoEvidencia,
@@ -98,49 +99,141 @@ def _qa(run_id, *, ok: bool = True) -> QAResult:
     )
 
 
-def _ledger(run_id, *, clase: ClaseFuente = ClaseFuente.render_permitido) -> ProvenanceLedger:
-    evidencia = Evidence(
-        evidence_id="ev-1",
-        kind=TipoEvidencia.registro_propiedad,
-        reference="artefacto de la corrida",
-        description="el pipeline generó este vídeo",
-        issued_by="pipeline",
-    )
-    fuente = SourceAsset(
+#: Las **entradas** del render, que es lo que el ledger clasifica: de dónde
+#: viene cada cosa que acaba dentro del vídeo. El MP4 final no está aquí porque
+#: es el producto de esa cadena, no un eslabón.
+ENTRADAS = {
+    "narration": "voice/narration.mp3",
+    "material": "render/material.mp4",
+    "subtitles": "subs/subtitles.ass",
+    "overlay": "overlay/overlay.ass",
+}
+
+
+def _escribir_entradas(directorio: Path) -> dict[str, str]:
+    """Escribe los recursos de entrada y devuelve su huella por papel."""
+    huellas = {}
+    for papel, ruta in ENTRADAS.items():
+        destino = directorio / ruta
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        contenido = f"contenido-de-{papel}".encode() * 32
+        destino.write_bytes(contenido)
+        huellas[papel] = hashlib.sha256(contenido).hexdigest()
+    return huellas
+
+
+def _job(run_id) -> RenderJob:
+    """El job con la forma real: declara las entradas, no el producto."""
+    return RenderJob(
         run_id=run_id,
-        asset_id="video-final",
-        media_kind=TipoMedio.video,
-        origin="pipeline",
-        local_path=RUTA_VIDEO,
-        evidence=[evidencia],
+        task_id=run_id,
+        script="guion de prueba",
+        audio_path=ENTRADAS["narration"],
+        materials=[ENTRADAS["material"]],
+        subtitle_path=ENTRADAS["subtitles"],
+        overlay_path=ENTRADAS["overlay"],
+        # El job también declara dónde debe quedar el compuesto. Es una salida
+        # prevista, y por eso `assets_de_render` no la incluye.
+        output_path=RUTA_VIDEO,
     )
-    decision = LicenseDecision(
-        run_id=run_id,
-        asset_id="video-final",
-        decision=clase,
-        basis=BaseLicencia.propia,
-        evidence_ids=["ev-1"] if clase is ClaseFuente.render_permitido else [],
-        reason="generado por el pipeline",
-        decided_by="tests",
-        policy_version=VERSION_POLITICA,
-    )
+
+
+def _ledger(
+    run_id,
+    *,
+    clase: ClaseFuente = ClaseFuente.render_permitido,
+    afectado: str = "material",
+    huellas: dict[str, str] | None = None,
+) -> ProvenanceLedger:
+    """Ledger sobre las entradas del render.
+
+    ``clase`` y ``afectado`` permiten degradar **un** recurso concreto para
+    comprobar que basta con uno para bloquear la publicación.
+    """
+    huellas = huellas or {}
+    fuentes = []
+    decisiones = []
+    permitidos = []
+
+    for papel, ruta in ENTRADAS.items():
+        propia = papel != afectado or clase is ClaseFuente.render_permitido
+        decision_papel = ClaseFuente.render_permitido if propia else clase
+
+        evidencia = Evidence(
+            evidence_id=f"ev-{papel}",
+            kind=TipoEvidencia.registro_propiedad,
+            reference=f"artefacto que generó {papel}",
+            description="recurso producido por el pipeline de esta corrida",
+            issued_by="pipeline",
+        )
+        fuentes.append(
+            SourceAsset(
+                run_id=run_id,
+                asset_id=papel,
+                media_kind=TipoMedio.video if papel == "material" else TipoMedio.otro,
+                origin="pipeline",
+                local_path=ruta,
+                sha256=huellas.get(papel),
+                evidence=[evidencia],
+            )
+        )
+        decisiones.append(
+            LicenseDecision(
+                run_id=run_id,
+                asset_id=papel,
+                decision=decision_papel,
+                basis=BaseLicencia.propia,
+                evidence_ids=(
+                    [f"ev-{papel}"]
+                    if decision_papel is ClaseFuente.render_permitido
+                    else []
+                ),
+                reason="generado por el pipeline de esta corrida",
+                decided_by="tests",
+                policy_version=VERSION_POLITICA,
+            )
+        )
+        if decision_papel is ClaseFuente.render_permitido:
+            permitidos.append(ruta)
+
     return ProvenanceLedger(
         run_id=run_id,
-        sources=[fuente],
-        decisions=[decision],
-        render_assets=[RUTA_VIDEO] if clase is ClaseFuente.render_permitido else [],
+        sources=fuentes,
+        decisions=decisiones,
+        render_assets=permitidos,
     )
+
+
+def _evaluar_tal_cual(tmp_path: Path, run_id, sha, ledger, **sustituciones):
+    """Evalúa sin regenerar las entradas.
+
+    ``_evaluar`` las reescribe en cada llamada, que es cómodo para el camino
+    feliz pero deshace cualquier alteración hecha a propósito. Los tests que
+    sabotean un recurso necesitan evaluar el disco tal como lo dejaron.
+    """
+    args = dict(
+        render_result=_render(run_id, sha),
+        render_job=_job(run_id),
+        qa_result=_qa(run_id),
+        ledger=ledger,
+        metadata=metadata(run_id),
+        directorio_corrida=tmp_path,
+    )
+    args.update(sustituciones)
+    return evaluar_precondiciones(**args)
 
 
 def _evaluar(tmp_path: Path, **sustituciones):
     run_id = sustituciones.pop("run_id", uuid4())
     sha = sustituciones.pop("sha", None)
+    huellas = _escribir_entradas(tmp_path)
     if sha is None:
         sha = _escribir_video(tmp_path)
     args = dict(
         render_result=_render(run_id, sha),
+        render_job=_job(run_id),
         qa_result=_qa(run_id),
-        ledger=_ledger(run_id),
+        ledger=_ledger(run_id, huellas=huellas),
         metadata=metadata(run_id),
         directorio_corrida=tmp_path,
     )
@@ -220,7 +313,9 @@ def test_recurso_de_referencia_no_puede_publicarse(tmp_path):
         ledger=_ledger(run_id, clase=ClaseFuente.solo_referencia),
     )
     assert not gate.listo
-    assert any("no autoriza el render" in m for m in gate.motivos)
+    # El mensaje lo da la misma autoridad que guarda la puerta previa al motor.
+    assert any("no puede entrar al render" in m for m in gate.motivos)
+    assert any("reference_only" in m for m in gate.motivos)
 
 
 def test_sin_ledger_no_esta_listo(tmp_path):
@@ -610,3 +705,186 @@ def test_el_comportamiento_seguro_no_se_rompe(tmp_path):
     _, g = _evaluar(tmp_path, run_id=run_id, sha="f" * 64)
     assert not g.listo
     assert any("INTEGRITY_MISMATCH" in m for m in g.motivos)
+
+
+# ---------------------------------------------------------------------------
+# Regresión del fallo real de G7.3
+#
+# La primera ejecución contra YouTube murió en la puerta con:
+#
+#   "la procedencia de 'final/short.mp4' no autoriza el render (sin decisión);
+#    solo 'render_allowed' puede publicarse"
+#
+# La causa no era el ledger: era la pregunta. ``ProvenanceLedger`` clasifica las
+# **entradas** del render, y el MP4 final es el **producto** de esa cadena. Un
+# producto no lleva decisión de licencia propia, así que preguntar por él
+# devuelve «sin decisión», que es la respuesta correcta a una pregunta
+# equivocada.
+# ---------------------------------------------------------------------------
+
+
+def test_el_mp4_final_no_necesita_decision_propia(tmp_path):
+    """El fallo exacto de G7.3, al revés: ahora la corrida real pasa."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    sha = _escribir_video(tmp_path)
+    ledger = _ledger(run_id, huellas=huellas)
+
+    # Premisa del fallo: el ledger NO conoce el MP4 final, y así debe seguir.
+    assert ledger.fuente_de(RUTA_VIDEO) is None
+    assert ledger.clase(RUTA_VIDEO) is None
+    assert RUTA_VIDEO not in ledger.render_assets
+    assert not ledger.permite_render(RUTA_VIDEO)
+
+    _, gate = _evaluar(tmp_path, run_id=run_id, sha=sha, ledger=ledger)
+
+    assert gate.listo, gate.motivos
+    assert not any("final/short.mp4" in m for m in gate.motivos)
+    assert not any("sin decisión" in m for m in gate.motivos)
+
+
+def test_el_ledger_clasifica_entradas_no_el_producto(tmp_path):
+    """La separación, afirmada sobre el fixture con forma de corrida real."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    ledger = _ledger(run_id, huellas=huellas)
+
+    for ruta in ENTRADAS.values():
+        assert ledger.permite_render(ruta), ruta
+    assert not ledger.permite_render(RUTA_VIDEO)
+    assert not ledger.permite_render(RUTA_INTERMEDIO)
+
+
+def test_la_puerta_pregunta_por_los_assets_del_job(tmp_path):
+    """Lo que se comprueba es ``RenderJob.assets_de_render``, no el producto."""
+    run_id = uuid4()
+    job = _job(run_id)
+    assert set(job.assets_de_render) == set(ENTRADAS.values())
+    assert RUTA_VIDEO not in job.assets_de_render, "el producto no es una entrada"
+    assert RUTA_INTERMEDIO not in job.assets_de_render
+
+    _, gate = _evaluar(tmp_path, run_id=run_id, render_job=job)
+    assert gate.listo, gate.motivos
+
+
+def test_sin_render_job_no_hay_nada_que_comprobar(tmp_path):
+    """Omitirlo no puede ser una forma silenciosa de saltarse la procedencia."""
+    _, gate = _evaluar(tmp_path, render_job=None)
+    assert not gate.listo
+    assert any("RenderJob" in m for m in gate.motivos)
+
+
+# ---------------------------------------------------------------------------
+# Negativas: las tres clases que no autorizan siguen bloqueando
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "clase",
+    [
+        ClaseFuente.solo_referencia,
+        ClaseFuente.revision_pendiente,
+        ClaseFuente.bloqueado,
+    ],
+)
+@pytest.mark.parametrize("afectado", sorted(ENTRADAS))
+def test_una_entrada_no_autorizada_bloquea_la_publicacion(tmp_path, clase, afectado):
+    """Basta con que **una** entrada no esté autorizada, sea cual sea."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    sha = _escribir_video(tmp_path)
+    _, gate = _evaluar(
+        tmp_path,
+        run_id=run_id,
+        sha=sha,
+        ledger=_ledger(run_id, clase=clase, afectado=afectado, huellas=huellas),
+    )
+    assert not gate.listo, f"{clase.value} sobre {afectado} no bloqueó"
+    assert any(clase.value in m for m in gate.motivos), gate.motivos
+    assert any(ENTRADAS[afectado] in m for m in gate.motivos), gate.motivos
+
+
+def test_una_entrada_sin_declarar_bloquea(tmp_path):
+    """Un recurso que el ledger no conoce no pasa por ser 'de la casa'."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    sha = _escribir_video(tmp_path)
+
+    intruso = _job(run_id).model_copy(
+        update={"materials": ["render/material.mp4", "render/no_declarado.mp4"]}
+    )
+    (tmp_path / "render/no_declarado.mp4").write_bytes(b"x" * 100)
+
+    _, gate = _evaluar(
+        tmp_path, run_id=run_id, sha=sha, render_job=intruso,
+        ledger=_ledger(run_id, huellas=huellas),
+    )
+    assert not gate.listo
+    assert any("sin procedencia declarada" in m for m in gate.motivos), gate.motivos
+
+
+def test_una_entrada_que_cambio_desde_que_se_autorizo_bloquea(tmp_path):
+    """La decisión se tomó sobre un contenido concreto; si cambió, no aplica."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    sha = _escribir_video(tmp_path)
+
+    # El archivo se sustituye después de registrarse su huella.
+    (tmp_path / ENTRADAS["narration"]).write_bytes(b"otra-narracion" * 32)
+
+    gate = _evaluar_tal_cual(
+        tmp_path, run_id, sha, _ledger(run_id, huellas=huellas)
+    )
+    assert not gate.listo
+    assert any("cambió desde que se autorizó" in m for m in gate.motivos), gate.motivos
+
+
+def test_una_entrada_autorizada_que_no_existe_bloquea(tmp_path):
+    """Autorizado no es lo mismo que presente."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    sha = _escribir_video(tmp_path)
+    (tmp_path / ENTRADAS["overlay"]).unlink()
+
+    gate = _evaluar_tal_cual(
+        tmp_path, run_id, sha, _ledger(run_id, huellas=huellas)
+    )
+    assert not gate.listo
+    assert any("el archivo no existe" in m for m in gate.motivos), gate.motivos
+
+
+# ---------------------------------------------------------------------------
+# La integridad del producto sigue siendo contra output_path
+# ---------------------------------------------------------------------------
+
+
+def test_el_sha256_del_producto_se_sigue_verificando_contra_output_path(tmp_path):
+    """La corrección de las entradas no relajó la del producto."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    _escribir_video(tmp_path)
+
+    # Entradas impecables, producto manipulado.
+    _, gate = _evaluar(
+        tmp_path, run_id=run_id, sha="f" * 64, ledger=_ledger(run_id, huellas=huellas)
+    )
+    assert not gate.listo
+    assert any("INTEGRITY_MISMATCH" in m for m in gate.motivos), gate.motivos
+
+
+def test_las_dos_integridades_son_independientes(tmp_path):
+    """La del producto y la de cada entrada se comprueban por separado."""
+    run_id = uuid4()
+    huellas = _escribir_entradas(tmp_path)
+    sha = _escribir_video(tmp_path)
+
+    # Producto correcto, entrada alterada -> bloquea por la entrada.
+    (tmp_path / ENTRADAS["material"]).write_bytes(b"material-sustituido" * 32)
+    gate = _evaluar_tal_cual(
+        tmp_path, run_id, sha, _ledger(run_id, huellas=huellas)
+    )
+    assert not gate.listo
+    assert any("cambió desde que se autorizó" in m for m in gate.motivos)
+    assert not any("INTEGRITY_MISMATCH" in m for m in gate.motivos), (
+        "el producto está intacto y no debería figurar como alterado"
+    )
