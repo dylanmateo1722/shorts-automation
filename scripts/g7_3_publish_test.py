@@ -68,6 +68,7 @@ from app.contracts.models import (  # noqa: E402
     ProvenanceLedger,
     PublishMetadata,
     QAResult,
+    RenderJob,
     RenderResult,
 )
 from app.core.errors import ErrorPipeline  # noqa: E402
@@ -345,6 +346,10 @@ def ejecutar(run_id: UUID, directorio: Path, salida: Path) -> int:
     print("[2/5] Leyendo los artefactos de la corrida…")
     try:
         render_result = _leer(directorio, "final_video.json", RenderResult)
+        # El job dice qué entró al vídeo. Es lo que la puerta necesita para
+        # preguntarle al ledger por las **entradas** del render: el MP4 final es
+        # el producto y no lleva decisión de licencia propia.
+        render_job = _leer(directorio, "render_job.json", RenderJob)
         qa_result = _leer(directorio, "final_video_qa.json", QAResult)
         ledger = _leer(directorio, "provenance_ledger.json", ProvenanceLedger)
     except PruebaAbortada as exc:
@@ -367,6 +372,7 @@ def ejecutar(run_id: UUID, directorio: Path, salida: Path) -> int:
     print("[3/5] Evaluando la puerta de publicación…")
     gate = evaluar_precondiciones(
         render_result=render_result,
+        render_job=render_job,
         qa_result=qa_result,
         ledger=ledger,
         metadata=metadata,
@@ -378,6 +384,7 @@ def ejecutar(run_id: UUID, directorio: Path, salida: Path) -> int:
         "video_relative_path": render_result.output_path,
         "video_sha256": gate.video_sha256,
         "total_bytes": gate.total_bytes,
+        "render_inputs": render_job.assets_de_render,
     }
     if not gate.listo:
         volcar("NOT_READY", error=gate.resumen)

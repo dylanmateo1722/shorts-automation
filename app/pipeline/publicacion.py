@@ -13,13 +13,33 @@ Qué se comprueba, y por qué cada cosa:
   los avisos existen para ser leídos, no para bloquear.
 * **El MP4 existe en disco y su ruta es válida.** Que el artefacto declare una
   ruta no es evidencia de que haya un archivo en ella.
-* **La procedencia autoriza el render de ese archivo.** Se consulta el ledger, que
-  es la autoridad: ``permite_render`` solo devuelve cierto para
-  ``render_allowed``. Un recurso ``reference_only`` queda fuera aunque el archivo
-  esté ahí y la QA haya pasado.
+* **La procedencia autoriza todo lo que entró al vídeo.** Se comprueban los
+  recursos que declara ``RenderJob.assets_de_render`` —narración, material
+  visual, subtítulos y rótulo—, que son las **entradas** del render. Un recurso
+  ``reference_only`` queda fuera aunque el archivo esté ahí y la QA haya pasado.
 * **La integridad cuadra.** El SHA-256 del archivo en disco tiene que coincidir
   con el que el ``RenderResult`` registró. Si no coincide, el vídeo que hay no es
   el que se validó.
+
+Sobre qué autoriza el ledger, que es donde es fácil equivocarse
+--------------------------------------------------------------
+
+``ProvenanceLedger`` clasifica **entradas al render**: de dónde viene cada cosa
+que acaba dentro del vídeo y qué permite hacer con ella. El MP4 final es el
+**producto** de esa cadena, no un eslabón: lo genera el pipeline a partir de
+recursos ya autorizados, y no tiene —ni debe tener— una ``LicenseDecision``
+propia.
+
+Preguntarle al ledger por ``final/short.mp4`` devuelve «sin decisión», que es la
+respuesta correcta a una pregunta equivocada. Lo que hay que preguntar es si
+``RenderJob.assets_de_render`` está autorizado; el producto se comprueba de otra
+manera, por existencia, tamaño e integridad contra la huella que registró la
+composición.
+
+Añadir el MP4 final al ledger para que la pregunta encajara sería justamente el
+apaño que rompería la separación: convertiría un producto en una fuente y haría
+que el registro dejara de significar lo que dice.
+
 
 Lo que este módulo **no** hace: juzgar si la pieza es publicable en sentido
 editorial o legal. Eso vive en ``QAResult.editorial_legal_assessment``, no se
@@ -32,15 +52,21 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.core.errors import EntradaInvalida
+from app.core.errors import EntradaInvalida, ProcedenciaInvalida
 from app.contracts.models import (
     EstadoQA,
     EstadoRender,
     ProvenanceLedger,
     PublishMetadata,
     QAResult,
+    RenderJob,
     RenderResult,
 )
+from app.core.workspace import Workspace
+# La puerta de procedencia del render es la autoridad, y se reutiliza en vez de
+# reescribirse: dos implementaciones de la misma regla acaban divergiendo, y la
+# que se quede atrás será la que deje pasar algo.
+from app.pipeline.render import verificar_procedencia
 
 #: Tamaño de lectura al calcular la huella. Un MP4 no cabe en memoria de golpe.
 BLOQUE_HASH = 1024 * 1024
@@ -118,6 +144,7 @@ class ResultadoGate:
 def evaluar_precondiciones(
     *,
     render_result: RenderResult | None,
+    render_job: RenderJob | None,
     qa_result: QAResult | None,
     ledger: ProvenanceLedger | None,
     metadata: PublishMetadata | None,
@@ -128,6 +155,12 @@ def evaluar_precondiciones(
     Devuelve siempre un ``ResultadoGate``; no levanta excepciones por una
     precondición incumplida, porque no cumplirlas es un desenlace previsto y no
     un error del programa.
+
+    ``render_job`` es obligatorio y no tiene valor por defecto: dice qué entró
+    de verdad al vídeo, y sin él no hay nada cuya procedencia comprobar.
+    Dejarlo opcional permitiría que un llamador lo omitiera y se saltara la
+    puerta sin enterarse, que es exactamente la clase de omisión silenciosa que
+    esta puerta existe para impedir.
     """
     motivos: list[str] = []
 
@@ -198,17 +231,43 @@ def evaluar_precondiciones(
             if total_bytes == 0:
                 motivos.append(f"el vídeo {ruta_relativa!r} está vacío")
 
-    # --- La procedencia -----------------------------------------------------
+    # --- La procedencia de lo que ENTRÓ al vídeo ----------------------------
+    #
+    # Se pregunta por las entradas del render, no por el MP4 final. El ledger
+    # clasifica de dónde viene cada cosa que acaba dentro del vídeo; el vídeo en
+    # sí es el producto de esa cadena y no lleva decisión propia.
     if ledger is None:
-        motivos.append("no hay ProvenanceLedger: no consta la procedencia del vídeo")
-    elif ruta_relativa:
-        if not ledger.permite_render(ruta_relativa):
-            clase = ledger.clase(ruta_relativa)
-            detalle = clase.value if clase is not None else "sin decisión"
+        motivos.append(
+            "no hay ProvenanceLedger: no consta la procedencia de lo que entró "
+            "al vídeo"
+        )
+    if render_job is None:
+        motivos.append(
+            "no hay RenderJob: no consta qué recursos entraron al vídeo, así que "
+            "no hay nada cuya procedencia se pueda comprobar"
+        )
+    elif ledger is not None:
+        rutas = render_job.assets_de_render
+        if not rutas:
             motivos.append(
-                f"la procedencia de {ruta_relativa!r} no autoriza el render "
-                f"({detalle}); solo 'render_allowed' puede publicarse"
+                "el RenderJob no declara ningún recurso: un vídeo sin entradas "
+                "no es comprobable"
             )
+        else:
+            # Misma autoridad que la puerta previa al motor: declarado, decidido,
+            # 'render_allowed', el archivo existe y su huella sigue siendo la que
+            # se autorizó. Reutilizarla evita que dos copias de la regla
+            # diverjan; convierte su excepción en un motivo porque aquí las
+            # precondiciones se acumulan en vez de interrumpir.
+            try:
+                verificar_procedencia(
+                    Workspace.en_directorio(directorio_corrida, render_job.run_id),
+                    ledger,
+                    rutas,
+                    etapa="publication_gate",
+                )
+            except ProcedenciaInvalida as exc:
+                motivos.append(str(exc))
 
     # --- La integridad ------------------------------------------------------
     if video_path is not None and render_result is not None:
