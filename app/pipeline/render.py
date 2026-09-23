@@ -52,6 +52,8 @@ from app.pipeline.transformation import (
     ARTEFACTO_OVERLAY,
     ARTEFACTO_PROCEDENCIA,
     ARTEFACTO_TRANSFORMACION,
+    material_seleccionado,
+    resolver_material,
 )
 from app.pipeline.voice import (
     ARTEFACTO_GUION,
@@ -269,12 +271,22 @@ def construir_job(ctx: ContextoEtapa) -> RenderJob:
 
     verificar_transformacion(conjunto, etapa="render_job")
 
+    # Qué material visual lleva la pieza. Por defecto el que genera el pipeline;
+    # si la corrida eligió una fuente declarada, esa. La elección se resuelve
+    # **contra el ledger**, así que un recurso no autorizado no puede llegar
+    # aquí aunque alguien lo nombre en la configuración.
+    elegido = material_seleccionado(ctx)
+    if elegido is None:
+        ruta_material = material.output_path
+    else:
+        ruta_material = resolver_material(ledger, elegido, etapa="render_job")
+
     job = RenderJob(
         run_id=ws.run_id,
         task_id=ws.run_id,
         script=guion.full_text,
         audio_path=voz.audio_path,
-        materials=[material.output_path],
+        materials=[ruta_material],
         subtitle_path=subtitulos.ass_path,
         overlay_path=overlay.overlay_path,
         output_path=RUTA_FINAL,
