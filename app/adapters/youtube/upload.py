@@ -300,6 +300,12 @@ def _cuerpo_metadata(metadata: PublishMetadata) -> bytes:
     Solo lleva lo que la metadata declara. No se inventa ningún campo, y
     ``privacyStatus`` sale de la intención registrada, nunca de un valor por
     defecto de este módulo.
+
+    ``containsSyntheticMedia`` sigue la misma regla, y por eso se envía solo
+    cuando la metadata lo declara: ``None`` significa que nadie lo decidió, y
+    mandar ``false`` en su lugar sería declarar en nombre de otro que la pieza no
+    contiene medios sintéticos. No declarado y declarado como falso son cosas
+    distintas, y aquí se mantienen distintas.
     """
     snippet: dict = {
         "title": metadata.title,
@@ -310,13 +316,13 @@ def _cuerpo_metadata(metadata: PublishMetadata) -> bytes:
         snippet["tags"] = list(metadata.tags)
     if metadata.category_id:
         snippet["categoryId"] = metadata.category_id
-    recurso = {
-        "snippet": snippet,
-        "status": {
-            "privacyStatus": metadata.privacy_status.value,
-            "selfDeclaredMadeForKids": metadata.made_for_kids,
-        },
+    estado: dict = {
+        "privacyStatus": metadata.privacy_status.value,
+        "selfDeclaredMadeForKids": metadata.made_for_kids,
     }
+    if metadata.contains_synthetic_media is not None:
+        estado["containsSyntheticMedia"] = metadata.contains_synthetic_media
+    recurso = {"snippet": snippet, "status": estado}
     return json.dumps(recurso, ensure_ascii=False).encode("utf-8")
 
 

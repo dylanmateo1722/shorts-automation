@@ -49,7 +49,13 @@ SCHEMA_VERSION_TRANSFORMACION = "1.0"
 # "1.1" lo sube Gate 7.2, que añade a los contratos ya existentes la referencia a
 # la sesión de subida y el resultado de la reconciliación. Es un cambio aditivo:
 # un artefacto "1.0" sigue validando, porque los campos nuevos son opcionales.
-SCHEMA_VERSION_PUBLICACION = "1.1"
+#
+# "1.2" lo sube Gate 7.4-B, que añade a ``PublishMetadata`` la declaración de
+# medios sintéticos y estrena ``AprobacionEditorial``. Sigue siendo aditivo por el
+# mismo criterio: el campo nuevo es opcional en ``PublishMetadata``, así que un
+# artefacto "1.1" continúa validando. Lo que **no** es opcional es declararlo en
+# una publicación editorial, y eso lo exige ``MetadataEditorial``, no la base.
+SCHEMA_VERSION_PUBLICACION = "1.2"
 
 # Reglas de legibilidad del subtítulo, fijadas por el contrato. Son una
 # heurística inicial —no una garantía de que ningún cue pase de 32 caracteres—
@@ -1711,6 +1717,43 @@ class ReconciliationResult(Artefacto):
         return self.outcome is DesenlaceReconciliacion.desconocido
 
 
+# Límites que la documentación de ``videos.insert`` fija para el recurso ``video``.
+# Se validan aquí porque son deterministas y comprobables sin red: descubrirlos
+# como un 400 a mitad de una subida sería descubrirlos en el peor momento.
+#
+#   snippet.title        «maximum length of 100 characters»
+#   snippet.description  «maximum length of 5000 bytes»   ← bytes, no caracteres
+#   snippet.tags         «maximum length of 500 characters», con las dos reglas
+#                        de conteo que documenta la API (ver longitud_etiquetas)
+#
+# Lo que NO se valida aquí, a propósito: ``categoryId`` y ``defaultLanguage``. La
+# documentación no fija para ellos ninguna restricción local, y el conjunto de
+# categorías válidas depende de la región y se obtiene de ``videoCategories.list``.
+# Inventar una lista fija o exigir BCP-47 sería imponer una regla nuestra como si
+# fuera de YouTube, y rechazaría metadata legítima.
+MAX_CARACTERES_TITULO = 100
+MAX_BYTES_DESCRIPCION = 5000
+MAX_CARACTERES_ETIQUETAS = 500
+
+
+def longitud_etiquetas(tags: list[str]) -> int:
+    """Los caracteres que YouTube cuenta para ``snippet.tags``.
+
+    No es la suma de las longitudes. La documentación fija dos reglas de conteo:
+    las comas que separan los elementos de la lista cuentan para el límite, y una
+    etiqueta que contenga un espacio se trata como si fuera entre comillas, que
+    también cuentan. De ahí su propio ejemplo: ``Foo-Baz`` son 7 caracteres y
+    ``Foo Baz`` son 9.
+
+    Una lista vacía mide 0: no hay elementos ni separadores.
+    """
+    if not tags:
+        return 0
+    # Las comillas solo se añaden a las etiquetas con espacio; el separador es
+    # uno menos que el número de elementos.
+    return sum(len(t) + (2 if " " in t else 0) for t in tags) + len(tags) - 1
+
+
 class PublishMetadata(Artefacto):
     """Qué se quiere publicar. Intención, no resultado.
 
@@ -1727,19 +1770,147 @@ class PublishMetadata(Artefacto):
 
     schema_version: str = SCHEMA_VERSION_PUBLICACION
 
-    title: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=MAX_CARACTERES_TITULO)
     description: str = ""
     tags: list[str] = Field(default_factory=list)
-    category_id: str | None = None
+    # Un ``categoryId`` en blanco no es «sin categoría»: sin categoría es ``None``.
+    # Qué identificadores son válidos depende de la región y lo dice
+    # ``videoCategories.list``; eso no se puede comprobar sin red y no se finge aquí.
+    category_id: TextoNoVacio | None = None
     privacy_status: Privacidad = Privacidad.privado
-    language: str = "es"
+    # ``defaultLanguage``. La documentación no le impone formato, así que tampoco se
+    # le impone aquí: lo único que no puede ser es estar en blanco.
+    language: TextoNoVacio = "es"
     made_for_kids: bool
     ai_disclosure: DivulgacionIA
+    #: ``status.containsSyntheticMedia``: declara contenido alterado o sintético
+    #: realista. ``None`` significa **no declarado**, y entonces el campo no se
+    #: envía; no es lo mismo que declarar ``False``, que afirma que no lo contiene.
+    #:
+    #: Se mantiene deliberadamente **separado** de ``ai_disclosure``. Que una
+    #: narración venga de un TTS no determina por sí solo esta declaración, igual
+    #: que no determina la divulgación de IA, y derivar uno del otro convertiría
+    #: dos juicios distintos en uno inventado. Mientras el contrato no establezca
+    #: una relación explícita entre ambos, no hay ninguna.
+    #:
+    #: Es opcional en la base porque hay publicaciones que no la declararon. Una
+    #: publicación **editorial** sí tiene que declararla: lo exige
+    #: ``MetadataEditorial``, que es donde vive esa obligación.
+    contains_synthetic_media: bool | None = None
+
+    @model_validator(mode="after")
+    def _comprobar_limites_documentados(self) -> "PublishMetadata":
+        """Los dos límites que ``Field`` no puede expresar.
+
+        ``title`` lo limita su propio ``max_length``, que cuenta caracteres y es
+        lo que la documentación pide. Los otros dos no encajan ahí: la descripción
+        se mide en **bytes** UTF-8, y las etiquetas se cuentan con las reglas de
+        la lista, no sumando longitudes.
+        """
+        bytes_descripcion = len(self.description.encode("utf-8"))
+        if bytes_descripcion > MAX_BYTES_DESCRIPCION:
+            raise ValueError(
+                f"la descripción mide {bytes_descripcion} bytes y YouTube admite "
+                f"{MAX_BYTES_DESCRIPCION} como máximo"
+            )
+        caracteres_etiquetas = longitud_etiquetas(self.tags)
+        if caracteres_etiquetas > MAX_CARACTERES_ETIQUETAS:
+            raise ValueError(
+                f"las etiquetas suman {caracteres_etiquetas} caracteres contando "
+                f"separadores y comillas, y YouTube admite "
+                f"{MAX_CARACTERES_ETIQUETAS} como máximo"
+            )
+        return self
 
     @property
     def permite_publicacion_automatica(self) -> bool:
         """Si la divulgación registrada deja publicar sin intervención humana."""
         return self.ai_disclosure.permite_publicacion_automatica
+
+
+class MetadataEditorial(PublishMetadata):
+    """La metadata de una publicación **editorial** de Gate 7.4-B.
+
+    Es un ``PublishMetadata`` —valida como tal y ``publicar`` la acepta sin saber
+    que existe esta subclase— con dos obligaciones más, que no se le pueden pedir
+    a la base sin romper lo que ya está publicado con ella:
+
+    * **Privacidad.** Gate 7.4-B es publicación privada de contenido editorial
+      real. ``unlisted`` y ``public`` no se rechazan en ``Privacidad`` porque el
+      enum describe lo que es representable, ni en ``PublishMetadata`` porque
+      otros flujos la construyen con otros valores; se rechazan **aquí**, que es
+      el contrato de este flujo. Una solicitud que pida otra visibilidad no
+      llega a existir como objeto, así que no hay camino que la lleve a abrir una
+      sesión de subida.
+
+    * **Medios sintéticos.** ``contains_synthetic_media`` deja de ser opcional.
+      No se infiere de nada: se declara. Un ``False`` explícito afirma que la
+      pieza no contiene medios sintéticos realistas; omitirlo sería no haber
+      decidido, y una publicación editorial no sale con esa decisión pendiente.
+    """
+
+    privacy_status: Literal[Privacidad.privado] = Privacidad.privado
+    contains_synthetic_media: bool
+
+
+class AprobacionEditorial(Artefacto):
+    """El juicio editorial y legal de una persona, declarado aparte.
+
+    Por qué un artefacto propio y no un campo de ``QAResult``
+    --------------------------------------------------------
+
+    ``QAResult.editorial_legal_assessment`` es el sitio donde el contrato dice que
+    vive este juicio, y su estado por defecto es ``NOT_ASSESSED``. Pero
+    ``QAResult`` **lo produce el pipeline**: pedirle a una persona que edite a mano
+    un artefacto generado convertiría una decisión humana en una modificación de
+    una salida automática, y la siguiente corrida la pisaría sin avisar.
+
+    Así que la decisión se declara en su propio documento, con su propio autor y su
+    propio motivo, y el pipeline no la escribe nunca. ``QAResult`` se queda como lo
+    dejó la QA.
+
+    A qué queda atada
+    -----------------
+
+    Una aprobación no vale «para el canal» ni «para la pieza»: vale para **esta**
+    corrida, **este** vídeo y **este** material. Los tres campos que lo atan son
+    obligatorios y la puerta los comprueba uno por uno:
+
+    * ``run_id`` —heredado de ``Artefacto``— la corrida.
+    * ``video_sha256`` el archivo exacto que la persona vio. Si se vuelve a
+      renderizar, la huella cambia y la aprobación deja de aplicar, que es lo
+      correcto: nadie aprobó el vídeo nuevo.
+    * ``materials`` el material visual exacto que entró. Cambiarlo por otro
+      invalida la aprobación aunque el resto sea idéntico.
+
+    ``status`` no tiene valor por defecto. Un ``REJECTED_BY_HUMAN`` es tan
+    declarable como una aprobación, y queda registrado con su motivo; lo que no
+    existe es una aprobación implícita.
+    """
+
+    schema_version: str = SCHEMA_VERSION_PUBLICACION
+
+    status: EstadoEvaluacion
+    approved_by: TextoNoVacio
+    reason: TextoNoVacio
+    video_sha256: Sha256Hex
+    materials: list[RutaRelativa] = Field(min_length=1)
+    decided_at: datetime = Field(default_factory=_ahora)
+    #: Estructuralmente falso, igual que en ``EvaluacionEditorialLegal``: no existe
+    #: puntuación de similitud ni umbral de diferencia en este proyecto, y el campo
+    #: está aquí para que cada aprobación lo afirme en lugar de dejarlo implícito.
+    automated_similarity_threshold_applied: Literal[False] = False
+
+    @property
+    def aprobado(self) -> bool:
+        """Si esta declaración autoriza a publicar.
+
+        Solo ``APPROVED_BY_HUMAN``. ``NOT_ASSESSED`` y ``REJECTED_BY_HUMAN``
+        devuelven ``False``, y cualquier estado que se añada al enum en el futuro
+        también, porque la comprobación es por igualdad con el único que aprueba y
+        no por exclusión de los que no.
+        """
+        return self.status is EstadoEvaluacion.aprobado_por_humano
 
 
 class PublishJob(Artefacto):
