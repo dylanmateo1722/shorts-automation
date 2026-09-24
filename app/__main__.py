@@ -2,7 +2,7 @@
 
     python -m app run [--pipeline render|linguistic|voice|transformation|e2e]
                       [--run-id UUID] [--force STAGE] [--reference-asset RUTA]
-                      [--sources ARCHIVO]
+                      [--sources ARCHIVO] [--material-asset ASSET_ID]
     python -m app validate <run-id> [--pipeline ...]
     python -m app youtube-auth
     python -m app youtube-auth-bootstrap --credentials RUTA
@@ -27,7 +27,11 @@ from app.core.run_id import nuevo_run_id, parsear_run_id
 from app.pipeline.core import construir_pipeline, ejecutar_run, validar_run
 from app.pipeline.linguistic import construir_pipeline_linguistico
 from app.pipeline.qa import construir_pipeline_transformacion
-from app.pipeline.transformation import CLAVE_DECLARACIONES, CLAVE_REFERENCIAS
+from app.pipeline.transformation import (
+    CLAVE_DECLARACIONES,
+    CLAVE_MATERIAL_SELECCIONADO,
+    CLAVE_REFERENCIAS,
+)
 from app.pipeline.voice import construir_pipeline_voz
 
 
@@ -110,6 +114,15 @@ def _construir_parser() -> argparse.ArgumentParser:
              "evidencia. La política decide la clase de cada una; declararlas no "
              "las autoriza. No se descarga nada: las rutas locales deben existir "
              "ya en el directorio de la corrida",
+    )
+    ejecutar.add_argument(
+        "--material-asset", default=None, metavar="ASSET_ID",
+        help="identificador de la fuente declarada en --sources que se usa como "
+             "material visual de esta pieza. Autorizar y elegir son cosas "
+             "distintas: una fuente 'render_allowed' que no se elija aquí no "
+             "entra al vídeo, y elegir una que no esté autorizada detiene la "
+             "corrida. Sin este argumento se usa el material que genera el "
+             "propio pipeline",
     )
     ejecutar.add_argument(
         "--force", default=None, metavar="ETAPA",
@@ -262,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                 parametros[CLAVE_REFERENCIAS] = args.reference_asset
             if args.sources:
                 parametros[CLAVE_DECLARACIONES] = args.sources
+            if args.material_asset:
+                parametros[CLAVE_MATERIAL_SELECCIONADO] = args.material_asset
             resultado = ejecutar_run(
                 run_id, settings, forzar=args.force,
                 parametros=parametros, etapas=etapas,

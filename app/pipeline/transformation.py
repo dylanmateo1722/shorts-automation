@@ -87,6 +87,25 @@ CLAVE_REFERENCIAS = "reference_assets"
 #: Es la única entrada de material ajeno: no hay búsqueda ni descarga automática.
 CLAVE_DECLARACIONES = "source_declarations"
 
+#: Clave de parámetro con el ``asset_id`` de la fuente declarada que se usa como
+#: material visual de **esta** pieza.
+#:
+#: Son dos decisiones distintas y el sistema las mantiene separadas:
+#:
+#:   «puedo renderizar este recurso»      lo decide la política de procedencia
+#:   «quiero este recurso como material»  lo decide una persona, aquí
+#:
+#: Autorizar no es seleccionar. Una corrida puede declarar diez fuentes
+#: ``render_allowed`` y usar una sola; convertir automáticamente en material
+#: visual todo lo autorizado borraría esa diferencia y metería en el vídeo cosas
+#: que nadie eligió. Por eso la selección es explícita, se nombra por
+#: ``asset_id`` —la identidad estable de la fuente, no su ruta— y queda en la
+#: configuración de la corrida, que el manifest persiste.
+#:
+#: Seleccionar tampoco autoriza: un recurso seleccionado que no esté
+#: ``render_allowed`` detiene la corrida con un error, no se cuela ni se ignora.
+CLAVE_MATERIAL_SELECCIONADO = "render_material_asset"
+
 #: Prefijo de los identificadores de las fuentes que produce el propio pipeline.
 #: El identificador es el papel del recurso, no su ruta: la ruta puede cambiar y
 #: la identidad no.
@@ -234,6 +253,71 @@ def _referencias(ctx: ContextoEtapa) -> list[str]:
             )
         rutas.append(ruta)
     return rutas
+
+
+def material_seleccionado(ctx: ContextoEtapa) -> str | None:
+    """``asset_id`` de la fuente elegida como material visual, si hay alguna.
+
+    Devuelve el identificador, no la ruta: resolver la ruta exige el ledger, y
+    quien la resuelva debe pasar por la decisión de licencia. Así no hay forma
+    de saltarse la procedencia leyendo la configuración directamente.
+    """
+    bruto = ctx.parametros.get(CLAVE_MATERIAL_SELECCIONADO)
+    if bruto is None:
+        return None
+    asset_id = str(bruto).strip()
+    if not asset_id:
+        raise EntradaInvalida(
+            "se indicó un material visual sin identificador",
+            stage="provenance",
+        )
+    return asset_id
+
+
+def resolver_material(
+    ledger: ProvenanceLedger, asset_id: str, *, etapa: str
+) -> str:
+    """Ruta del material seleccionado, **solo** si la procedencia lo autoriza.
+
+    Es el único camino de un ``asset_id`` elegido a una ruta utilizable, y pasa
+    por las tres preguntas en orden: existe la fuente, hay decisión, y la
+    decisión es ``render_allowed``. Un recurso ``reference_only``,
+    ``needs_review``, ``blocked`` o sin decidir termina aquí con un error que lo
+    nombra: seleccionarlo no lo autoriza.
+
+    La huella no se comprueba en esta función. La comprueba
+    ``verificar_procedencia`` sobre ``RenderJob.assets_de_render``, que es la
+    puerta única del render; duplicar la comprobación aquí daría dos sitios
+    donde puede divergir.
+    """
+    fuente = ledger.fuente(asset_id)
+    if fuente is None:
+        raise EntradaInvalida(
+            f"se eligió {asset_id!r} como material visual y no hay ninguna "
+            f"fuente declarada con ese identificador",
+            stage=etapa,
+        )
+    if not fuente.local_path:
+        raise EntradaInvalida(
+            f"la fuente {asset_id!r} no tiene archivo local: no puede ser el "
+            f"material visual de la pieza",
+            stage=etapa,
+        )
+    decision = ledger.decision(asset_id)
+    if decision is None:
+        raise ProcedenciaInvalida(
+            f"se eligió {asset_id!r} como material visual y no tiene ninguna "
+            f"decisión de licencia",
+            stage=etapa,
+        )
+    if decision.decision is not ClaseFuente.render_permitido:
+        raise ProcedenciaInvalida(
+            f"se eligió {asset_id!r} como material visual y está clasificado "
+            f"{decision.decision.value!r}: elegir un recurso no lo autoriza. "
+            f"{decision.reason}",
+            stage=etapa,
+        )
+    return fuente.local_path
 
 
 def _material_visual(ws: Workspace) -> str | None:
@@ -435,9 +519,44 @@ def registrar_procedencia(ctx: ContextoEtapa) -> ProvenanceLedger:
         fuentes.append(fuente)
         decisiones.append(declarar_referencia(fuente, run_id=ws.run_id))
 
+    elegido = material_seleccionado(ctx)
+    decidido_por_id: dict[str, LicenseDecision] = {}
+    fuente_por_id: dict[str, SourceAsset] = {}
+
     for basis, fuente in _fuentes_externas(ctx):
+        decision = decidir(fuente, basis, run_id=ws.run_id)
         fuentes.append(fuente)
-        decisiones.append(decidir(fuente, basis, run_id=ws.run_id))
+        decisiones.append(decision)
+        fuente_por_id[fuente.asset_id] = fuente
+        decidido_por_id[fuente.asset_id] = decision
+
+    # La fuente elegida como material visual entra en render_assets **solo** si
+    # su decisión la autoriza. Las dos condiciones son necesarias y ninguna
+    # basta: autorizado sin elegir no entra —hay que quererlo en esta pieza—, y
+    # elegido sin autorizar detiene la corrida en vez de colarse.
+    if elegido is not None:
+        fuente = fuente_por_id.get(elegido)
+        decision = decidido_por_id.get(elegido)
+        if fuente is None:
+            raise EntradaInvalida(
+                f"se eligió {elegido!r} como material visual y no está entre las "
+                f"fuentes declaradas de esta corrida",
+                stage="provenance",
+            )
+        if not fuente.local_path:
+            raise EntradaInvalida(
+                f"la fuente {elegido!r} no tiene archivo local: no puede ser el "
+                f"material visual de la pieza",
+                stage="provenance",
+            )
+        if decision is None or decision.decision is not ClaseFuente.render_permitido:
+            clase = decision.decision.value if decision else "sin decisión"
+            raise ProcedenciaInvalida(
+                f"se eligió {elegido!r} como material visual y está clasificado "
+                f"{clase!r}: elegir un recurso no lo autoriza",
+                stage="provenance",
+            )
+        permitidos.append(fuente.local_path)
 
     # El contrato rechaza el ledger si algo que no esté autorizado entrara en
     # render_assets. La restricción es estructural: no hay etapa que pueda
