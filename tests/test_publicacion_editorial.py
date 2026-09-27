@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from app.adapters.youtube.upload import iniciar_sesion
 from app.config.provenance import VERSION_POLITICA
 from app.contracts.models import (
+    CARACTERES_PROHIBIDOS_EN_TEXTO,
     MAX_BYTES_DESCRIPCION,
     MAX_CARACTERES_ETIQUETAS,
     MAX_CARACTERES_TITULO,
@@ -438,6 +439,154 @@ def test_no_se_impone_bcp_47_al_idioma():
         assert _metadata_editorial(run_id, language=valor).language == valor
     with pytest.raises(ValidationError):
         _metadata_editorial(run_id, language="")
+
+
+# ---------------------------------------------------------------------------
+# 1-bis. H-4 — «all valid UTF-8 characters except < and >»
+#
+# La documentación describe ``title`` y ``description`` con la misma frase, así
+# que es una restricción del proveedor y no un criterio nuestro. Vive en
+# ``MetadataEditorial`` por el mismo motivo que la privacidad: la base sigue
+# siendo el contrato de los flujos anteriores.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["LOS SANTOS <FILES", "LOS SANTOS >FILES", "LOS SANTOS <FILES>"],
+    ids=["menor", "mayor", "ambos"],
+)
+def test_el_titulo_rechaza_los_caracteres_prohibidos(texto):
+    with pytest.raises(ValidationError) as exc:
+        _metadata_editorial(uuid4(), title=texto)
+    assert "el título contiene" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["Un <microdocumental", "Un >microdocumental", "Un <microdocumental>"],
+    ids=["menor", "mayor", "ambos"],
+)
+def test_la_descripcion_rechaza_los_caracteres_prohibidos(texto):
+    with pytest.raises(ValidationError) as exc:
+        _metadata_editorial(uuid4(), description=texto)
+    assert "la descripción contiene" in str(exc.value)
+
+
+def test_el_mensaje_nombra_los_dos_caracteres_cuando_aparecen_los_dos():
+    """Arreglar el texto exige saber qué hay que quitar, no solo que sobra algo."""
+    with pytest.raises(ValidationError) as exc:
+        _metadata_editorial(uuid4(), title="LOS SANTOS <FILES>")
+    mensaje = str(exc.value)
+    assert "'<'" in mensaje and "'>'" in mensaje
+
+
+def test_un_titulo_y_una_descripcion_sin_esos_caracteres_se_aceptan():
+    """Y no se prohíbe nada más: la lista es exactamente ``<`` y ``>``."""
+    assert CARACTERES_PROHIBIDOS_EN_TEXTO == ("<", ">")
+
+    titulo = "LOS SANTOS FILES — El universo GTA en 60 segundos"
+    descripcion = (
+        "Microdocumental vertical.\n\n"
+        "Signos que sí valen: ¿? ¡! «» — … 100% 3×4 a→b #gta @canal "
+        "«comillas», guiones-y_barras/ y (paréntesis)."
+    )
+    metadata = _metadata_editorial(uuid4(), title=titulo, description=descripcion)
+
+    assert metadata.title == titulo
+    assert metadata.description == descripcion
+
+
+def test_la_restriccion_no_se_extiende_a_las_etiquetas():
+    """La documentación no la enuncia para ``tags``, así que no se inventa.
+
+    Extenderla por analogía sería imponer una regla nuestra como si fuera de
+    YouTube, que es justo lo que H-4 no autoriza.
+    """
+    metadata = _metadata_editorial(uuid4(), tags=["<gta>", "los santos"])
+    assert metadata.tags == ["<gta>", "los santos"]
+
+
+def test_la_restriccion_no_se_extiende_a_otros_campos():
+    """``language`` y ``category_id`` no la llevan: la documentación no la enuncia."""
+    metadata = _metadata_editorial(uuid4(), language="es-CR", category_id="22")
+    assert metadata.language == "es-CR"
+    assert metadata.category_id == "22"
+
+
+def test_la_base_sigue_admitiendo_esos_caracteres():
+    """``PublishMetadata`` no cambia: sigue siendo el contrato de G7.2 y G7.3.
+
+    La restricción es del flujo editorial. Añadirla a la base cambiaría bajo sus
+    pies el contrato de los flujos anteriores sin necesidad.
+    """
+    base = PublishMetadata(
+        run_id=uuid4(),
+        title="Título con <etiqueta>",
+        description="Descripción con <etiqueta>",
+        made_for_kids=False,
+        ai_disclosure=_divulgacion(),
+    )
+    assert base.title == "Título con <etiqueta>"
+    assert base.description == "Descripción con <etiqueta>"
+
+
+def test_los_limites_de_longitud_siguen_vigentes_en_la_subclase():
+    """El validador de H-4 se suma al de la base, no lo sustituye.
+
+    Pydantic ejecuta los dos porque tienen nombres distintos. Si uno hubiera
+    sustituido al otro, los límites de longitud dejarían de comprobarse en la
+    metadata editorial y este test lo diría.
+    """
+    run_id = uuid4()
+    with pytest.raises(ValidationError) as exc:
+        _metadata_editorial(run_id, description="a" * (MAX_BYTES_DESCRIPCION + 1))
+    assert "bytes" in str(exc.value)
+
+    with pytest.raises(ValidationError):
+        _metadata_editorial(run_id, title="t" * (MAX_CARACTERES_TITULO + 1))
+
+    with pytest.raises(ValidationError) as exc:
+        _metadata_editorial(run_id, tags=["x" * 51] + ["x" * 49] * 9)
+    assert "etiquetas suman" in str(exc.value)
+
+
+def test_un_titulo_prohibido_no_abre_ninguna_sesion(corrida):
+    """La restricción actúa antes de la red, como las otras dos.
+
+    Se escribe el JSON a mano porque el objeto prohibido no se puede construir,
+    que es precisamente lo que se quiere demostrar.
+    """
+    transporte = _guion_feliz()
+    base = corrida["dir"].parent / "declaraciones"
+    base.mkdir(exist_ok=True)
+
+    crudo = json.loads(_metadata_editorial(corrida["run_id"]).model_dump_json())
+    crudo["title"] = "LOS SANTOS <FILES>"
+    ruta_meta = base / "metadata.json"
+    ruta_meta.write_text(json.dumps(crudo), encoding="utf-8")
+    ruta_apro = base / "aprobacion.json"
+    ruta_apro.write_text(
+        _aprobacion(
+            corrida["run_id"], corrida["sha"], corrida["materials"]
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EntradaInvalida) as exc:
+        pe.preparar(
+            run_id=corrida["run_id"],
+            directorio_corrida=corrida["dir"],
+            ruta_metadata=ruta_meta,
+            ruta_aprobacion=ruta_apro,
+        )
+
+    assert "no cumple su contrato" in str(exc.value)
+    assert transporte.llamadas == [], "se contactó con el proveedor"
+    assert transporte.sesiones_iniciadas == 0
+    # Y no quedó ningún artefacto de publicación de un intento que no pasó el
+    # contrato: `preparar` falla al leer la declaración, antes de escribir nada.
+    assert not (corrida["dir"] / pe.DIRECTORIO_PUBLICACION).exists()
 
 
 # ---------------------------------------------------------------------------

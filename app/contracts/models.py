@@ -1735,6 +1735,15 @@ MAX_CARACTERES_TITULO = 100
 MAX_BYTES_DESCRIPCION = 5000
 MAX_CARACTERES_ETIQUETAS = 500
 
+#: Caracteres que la documentación excluye de ``title`` y ``description``. Los dos
+#: campos se describen igual: «may contain all valid UTF-8 characters **except**
+#: ``<`` and ``>``». Es una restricción del proveedor, determinista y comprobable
+#: en local, así que no hace falta descubrirla como un 400 a mitad de una subida.
+#:
+#: No se aplica a ``tags``: la documentación no la enuncia para ese campo, y
+#: extenderla por analogía sería inventar una regla de YouTube.
+CARACTERES_PROHIBIDOS_EN_TEXTO = ("<", ">")
+
 
 def longitud_etiquetas(tags: list[str]) -> int:
     """Los caracteres que YouTube cuenta para ``snippet.tags``.
@@ -1832,7 +1841,7 @@ class MetadataEditorial(PublishMetadata):
     """La metadata de una publicación **editorial** de Gate 7.4-B.
 
     Es un ``PublishMetadata`` —valida como tal y ``publicar`` la acepta sin saber
-    que existe esta subclase— con dos obligaciones más, que no se le pueden pedir
+    que existe esta subclase— con tres obligaciones más, que no se le pueden pedir
     a la base sin romper lo que ya está publicado con ella:
 
     * **Privacidad.** Gate 7.4-B es publicación privada de contenido editorial
@@ -1847,10 +1856,47 @@ class MetadataEditorial(PublishMetadata):
       No se infiere de nada: se declara. Un ``False`` explícito afirma que la
       pieza no contiene medios sintéticos realistas; omitirlo sería no haber
       decidido, y una publicación editorial no sale con esa decisión pendiente.
+
+    * **Caracteres del texto.** Ni el título ni la descripción pueden llevar
+      ``<`` ni ``>``. La documentación lo dice de los dos campos, así que es una
+      restricción del proveedor y no un criterio nuestro. Vive aquí y no en la
+      base por el mismo motivo que la privacidad: la base sigue siendo el
+      contrato de los flujos anteriores, y cambiarla bajo sus pies no es
+      necesario para que este flujo cumpla la regla.
+
+    Las tres se comprueban **antes de cualquier intento de red**: un objeto que
+    no las cumple no llega a construirse, así que no hay camino desde él hasta
+    pedir un token ni hasta abrir una sesión de subida.
     """
 
     privacy_status: Literal[Privacidad.privado] = Privacidad.privado
     contains_synthetic_media: bool
+
+    @model_validator(mode="after")
+    def _comprobar_caracteres_del_texto(self) -> "MetadataEditorial":
+        """``<`` y ``>``, que ``max_length`` no puede expresar.
+
+        Se comprueba aparte del validador de la base —y con otro nombre, para que
+        Pydantic ejecute los dos y no sustituya uno por otro—: los límites de
+        longitud valen para cualquier publicación, y esta restricción de
+        caracteres se aplica al flujo editorial.
+
+        Se informa el primer campo que incumpla, igual que hacen los límites de
+        longitud: el mensaje dice qué campo y qué carácter, que es lo que hace
+        falta para arreglarlo.
+        """
+        for campo, valor in (
+            ("el título", self.title),
+            ("la descripción", self.description),
+        ):
+            presentes = [c for c in CARACTERES_PROHIBIDOS_EN_TEXTO if c in valor]
+            if presentes:
+                enumerados = " y ".join(repr(c) for c in presentes)
+                raise ValueError(
+                    f"{campo} contiene {enumerados}, y YouTube no admite esos "
+                    f"caracteres en este campo"
+                )
+        return self
 
 
 class AprobacionEditorial(Artefacto):
