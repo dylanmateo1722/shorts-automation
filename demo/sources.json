@@ -1,0 +1,26 @@
+{
+  "note": "Fuentes declaradas a mano para la pieza de demostración. Declarar no autoriza: la política de procedencia decide la clase de cada una, y elegir cuál entra al vídeo es un acto aparte (--material-asset).",
+  "sources": [
+    {
+      "basis": "own",
+      "asset": {
+        "asset_id": "fondo-editorial-frio",
+        "media_kind": "video",
+        "origin": "generado por scripts/generar_material.py con FFmpeg: gradiente animado, líneas de barrido, grano y viñeta. Sin fuente externa y sin metraje de terceros.",
+        "local_path": "material/aportado.mp4",
+        "sha256": "77f3af08a9a929d4dd57a17b78d8e6d0fc121c82a0363c0300827d4e506c063a",
+        "commercial_use_allowed": true,
+        "notes": "Material propio, generado procedimentalmente. Sustituible por metraje con licencia en regla sin cambiar el pipeline: entraría por esta misma declaración con su base y su evidencia.",
+        "evidence": [
+          {
+            "evidence_id": "ev-fondo-generado",
+            "kind": "ownership_record",
+            "reference": "scripts/generar_material.py --look frio --duracion 48",
+            "description": "El archivo lo produce un script de este repositorio a partir de filtros de FFmpeg. No incorpora ninguna obra ajena, así que la base alegada es 'own' y es verificable regenerándolo.",
+            "issued_by": "shorts-automation"
+          }
+        ]
+      }
+    }
+  ]
+}

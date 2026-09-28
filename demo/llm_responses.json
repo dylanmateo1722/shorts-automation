@@ -1,0 +1,49 @@
+[
+  {
+    "text": "Stanislav Yevgrafovich Petrov fue un teniente coronel ruso de las Fuerzas de Defensa Aérea Soviéticas que desempeñó un papel clave en el incidente de la falsa alarma nuclear soviética de 1983. El 26 de septiembre de 1983, Petrov era el oficial de guardia en el centro de mando del sistema de alerta temprana nuclear Oko cuando el sistema informó de que se había lanzado un misil desde los Estados Unidos, seguido de hasta cuatro más. Petrov, que sospechaba una falsa alarma, decidió esperar una confirmación que nunca llegó, y declaró que la indicación del sistema era una falsa alarma. Le habían dicho que un ataque estadounidense sería total, de modo que apenas cinco misiles parecían un comienzo ilógico. El sistema de detección de lanzamientos era nuevo y, en su opinión, todavía no era del todo fiable. El radar terrestre no logró captar pruebas que lo corroboraran, ni siquiera después de varios minutos de espera.",
+    "segments": [
+      "Stanislav Yevgrafovich Petrov fue un teniente coronel ruso de las Fuerzas de Defensa Aérea Soviéticas que desempeñó un papel clave en el incidente de la falsa alarma nuclear soviética de 1983.",
+      "El 26 de septiembre de 1983, Petrov era el oficial de guardia en el centro de mando del sistema de alerta temprana nuclear Oko cuando el sistema informó de que se había lanzado un misil desde los Estados Unidos, seguido de hasta cuatro más.",
+      "Petrov, que sospechaba una falsa alarma, decidió esperar una confirmación que nunca llegó, y declaró que la indicación del sistema era una falsa alarma.",
+      "Le habían dicho que un ataque estadounidense sería total, de modo que apenas cinco misiles parecían un comienzo ilógico.",
+      "El sistema de detección de lanzamientos era nuevo y, en su opinión, todavía no era del todo fiable.",
+      "El radar terrestre no logró captar pruebas que lo corroboraran, ni siquiera después de varios minutos de espera."
+    ]
+  },
+  {
+    "hook": "En 1983, un solo hombre decidió no empezar una guerra nuclear.",
+    "sections": [
+      {
+        "kind": "hook",
+        "order": 0,
+        "text": "En 1983, un solo hombre decidió no empezar una guerra nuclear."
+      },
+      {
+        "kind": "context",
+        "order": 1,
+        "text": "Stanislav Petrov era el oficial de guardia de un centro de mando soviético. Su tarea era vigilar el cielo."
+      },
+      {
+        "kind": "development",
+        "order": 2,
+        "text": "El 26 de septiembre, el sistema anunció un misil lanzado desde Estados Unidos, y después hasta cuatro más."
+      },
+      {
+        "kind": "development",
+        "order": 3,
+        "text": "Petrov dudó. Le habían dicho que un ataque real sería total, así que cinco misiles parecían un comienzo ilógico. El radar terrestre no corroboraba nada."
+      },
+      {
+        "kind": "payoff",
+        "order": 4,
+        "text": "Declaró que era una falsa alarma. La confirmación nunca llegó. No hubo represalia. No hubo guerra."
+      }
+    ],
+    "notes": [
+      "Reestructuración narrativa propia: el extracto enciclopédico se reordena en gancho, contexto, desarrollo y remate para el formato vertical de 45 segundos. El orden de la fuente no es el orden del relato.",
+      "Contexto propio agregado: se explicita la función del oficial de guardia y la tensión de la decisión, que el extracto solo deja implícita.",
+      "No se incorpora ninguna afirmación ausente del extracto. En particular, no se menciona la causa técnica del fallo, que no se verificó en esta ejecución.",
+      "Fuente en inglés bajo CC BY-SA 4.0: la atribución queda registrada en el ProvenanceLedger de la corrida."
+    ]
+  }
+]
