@@ -34,6 +34,28 @@ texto real en inglés (CC BY-SA)
 * El motor de render: `scripts/setup_engine.sh`. No hace falta MoneyPrinterTurbo.
 * Salida a internet para Edge TTS. **No** hace falta ninguna credencial.
 
+## Empezar desde una URL real
+
+El punto de entrada del contenido es `app ingest`. Trae el texto real de una
+URL, escribe el transcript que el pipeline consume y, aparte, el documento de
+atribución:
+
+```bash
+uv run python -m app ingest "https://en.wikipedia.org/wiki/Vasily_Arkhipov" \
+    -o demo/arkhipov
+```
+
+Escribe `demo/arkhipov/transcript.json` y `demo/arkhipov/fuente.txt`.
+
+De Wikipedia lo trae por su API, que devuelve texto plano y declara la licencia
+(CC BY-SA 4.0). De cualquier otra web quita el marcado y conserva el texto,
+pero **no adivina la licencia**: sale como no declarada y la procedencia la
+registrará como desconocida, que es lo correcto —una licencia inventada haría
+que se tratara como permitido algo que nadie autorizó—.
+
+No descarga medios ni transcribe audio: extrae texto ya publicado. Llamar
+«transcripción» a eso sería darle un nombre que no le toca.
+
 ## Reproducirla
 
 ```bash

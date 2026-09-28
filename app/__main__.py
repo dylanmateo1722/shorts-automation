@@ -172,6 +172,28 @@ def _construir_parser() -> argparse.ArgumentParser:
              "pide token ni se envía un byte",
     )
 
+    ingerir = sub.add_parser(
+        "ingest",
+        help="trae el texto real de una URL y escribe el transcript de partida "
+             "más su documento de atribución. No descarga medios ni transcribe "
+             "audio: extrae texto ya publicado",
+    )
+    ingerir.add_argument("url", help="URL de la fuente")
+    ingerir.add_argument(
+        "--output", "-o", default="demo", metavar="DIRECTORIO",
+        help="dónde escribir transcript.json y fuente.txt (por defecto: demo)",
+    )
+    ingerir.add_argument(
+        "--max-caracteres", type=int, default=None, metavar="N",
+        help="cuánto texto conservar. Se corta por párrafos completos, nunca a "
+             "mitad de frase. 0 lo trae entero",
+    )
+    ingerir.add_argument(
+        "--idioma", default="en", metavar="CODIGO",
+        help="idioma de la fuente, para las webs genéricas. En Wikipedia se "
+             "deduce del dominio y este valor se ignora",
+    )
+
     sub.add_parser(
         "youtube-auth",
         help="comprueba una autorización de YouTube ya configurada; no sube nada",
@@ -219,6 +241,66 @@ def _construir_parser() -> argparse.ArgumentParser:
 #: Es una palabra concreta y no un ``--yes`` porque teclearla es un acto, y una
 #: publicación no debería poder salir de haber repetido un comando sin leerlo.
 CONFIRMACION = "SUBIR"
+
+
+def _ingerir(args: argparse.Namespace) -> int:
+    """Trae el texto real de una URL y deja la corrida lista para empezar.
+
+    Escribe dos archivos y no uno: el transcript que consume el pipeline y un
+    documento de atribución legible. El segundo no es adorno —es lo que permite
+    declarar la fuente en la procedencia y comprobar a mano de dónde salió el
+    contenido—, y separarlos evita que la atribución acabe dentro del texto que
+    se va a traducir.
+    """
+    from app.adapters.fuente import MAX_CARACTERES_POR_DEFECTO, ingerir
+
+    maximo = (
+        MAX_CARACTERES_POR_DEFECTO
+        if args.max_caracteres is None
+        else args.max_caracteres
+    )
+    documento = ingerir(args.url, max_caracteres=maximo, idioma=args.idioma)
+
+    destino = Path(args.output)
+    destino.mkdir(parents=True, exist_ok=True)
+    ruta_transcript = destino / "transcript.json"
+    ruta_fuente = destino / "fuente.txt"
+    ruta_transcript.write_text(
+        json.dumps(documento.a_transcript(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    ruta_fuente.write_text(documento.a_atribucion(), encoding="utf-8")
+
+    palabras = len(documento.text.split())
+    print(
+        json.dumps(
+            {
+                "title": documento.title,
+                "url": documento.url,
+                "provider": documento.provider,
+                "source_language": documento.source_language,
+                "license_id": documento.license_id,
+                "characters": len(documento.text),
+                "words": palabras,
+                "transcript": str(ruta_transcript),
+                "attribution": str(ruta_fuente),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+    if not documento.licencia_consta:
+        # Se avisa por stderr para no ensuciar el documento de stdout, y se
+        # avisa siempre: una fuente sin licencia declarada no es una fuente
+        # libre, es una fuente que alguien tiene que mirar.
+        print(
+            "\nAVISO: la fuente no declara licencia de forma legible. La "
+            "procedencia la registrará como desconocida y quedará fuera del "
+            "render hasta que una persona la decida.",
+            file=sys.stderr,
+        )
+    return 0
 
 
 def _publicar(args: argparse.Namespace, settings: Settings) -> int:
@@ -327,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr
             if args.comando
             in (
+                "ingest",
                 "publish",
                 "youtube-auth",
                 "youtube-auth-bootstrap",
@@ -400,6 +483,9 @@ def main(argv: list[str] | None = None) -> int:
             # Y el mismo criterio de código de salida, por el mismo motivo:
             # ``autenticado`` también es cierto para WRONG_CHANNEL.
             return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
+
+        if args.comando == "ingest":
+            return _ingerir(args)
 
         if args.comando == "publish":
             return _publicar(args, settings)

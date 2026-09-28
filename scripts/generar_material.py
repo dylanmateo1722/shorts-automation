@@ -53,13 +53,17 @@ FPS = 30
 #: iguales producen una pantalla plana, y dos tonos casi negros producen una
 #: pantalla negra. El extremo claro se mantiene por debajo del gris medio para
 #: que el subtítulo blanco con borde siga destacando.
+#: El extremo oscuro tampoco puede ser casi negro. El gradiente deriva, y cuando
+#: su extremo claro sale del encuadre lo que queda en pantalla es el oscuro: si
+#: ese es #050505, el Short se ve como una pantalla apagada durante segundos.
+#: Medido sobre fotogramas reales del render, no elegido a ojo.
 LOOKS = {
     # Azul de monitor de madrugada. Archivo, tecnología, guerra fría.
-    "frio": ("#1d4f7c", "#050c14"),
+    "frio": ("#20567f", "#0a1622"),
     # Ámbar de lámpara. Historia, memoria, relato personal.
-    "calido": ("#7a4a12", "#140a03"),
+    "calido": ("#7a4a12", "#231607"),
     # Gris de hormigón. Neutro, cuando el tema no debe teñirse de nada.
-    "neutro": ("#4a4f55", "#0b0d0f"),
+    "neutro": ("#4a5058", "#1a1e23"),
 }
 
 

@@ -1,0 +1,49 @@
+[
+  {
+    "text": "Vasili Aleksándrovich Arjípov (en ruso: Василий Александрович Архипов; 30 de enero de 1926 – 19 de agosto de 1998), también transliterado como Vasily Arkhipov, fue un vicealmirante de la Armada Soviética. Se le recuerda sobre todo por haber evitado una guerra nuclear durante la crisis de los misiles de Cuba en 1962.\n\nEn el momento de la crisis, Arjípov era jefe de estado mayor de una flotilla de submarinos soviéticos y estaba a bordo del submarino B-59 como segundo comandante. Cuando unos destructores estadounidenses lanzaron cargas de profundidad de prácticas cerca del submarino, su capitán y el oficial político creyeron que la guerra había empezado y se prepararon para lanzar un torpedo nuclear contra buques de la Armada de los Estados Unidos. Sin embargo, la autorización de lanzamiento exigía el acuerdo de los tres oficiales superiores. Arjípov se negó, y su decisión impidió el uso de armas nucleares.\n\nEn 2002, Thomas S. Blanton, director del National Security Archive de la Universidad George Washington, dijo que Arjípov fue «el hombre que salvó el mundo».\n\nArjípov ascendió a contralmirante en 1975 y dirigió la Academia Naval Kírov. En 1981 fue ascendido a vicealmirante y se retiró a mediados de la década de 1980.\n\nTras su retiro vivió en Zheleznodorozhny, en el óblast de Moscú. Murió de cáncer de riñón el 19 de agosto de 1998. Algunas fuentes vincularon después la enfermedad a la exposición a radiación durante su servicio.",
+    "segments": [
+      "Vasili Aleksándrovich Arjípov (30 de enero de 1926 – 19 de agosto de 1998) fue un vicealmirante de la Armada Soviética, recordado por haber evitado una guerra nuclear durante la crisis de los misiles de Cuba en 1962.",
+      "En el momento de la crisis era jefe de estado mayor de una flotilla de submarinos soviéticos y estaba a bordo del submarino B-59 como segundo comandante.",
+      "Cuando unos destructores estadounidenses lanzaron cargas de profundidad de prácticas, su capitán y el oficial político creyeron que la guerra había empezado y se prepararon para lanzar un torpedo nuclear.",
+      "La autorización de lanzamiento exigía el acuerdo de los tres oficiales superiores. Arjípov se negó, y su decisión impidió el uso de armas nucleares.",
+      "En 2002, Thomas S. Blanton dijo que Arjípov fue «el hombre que salvó el mundo».",
+      "Ascendió a contralmirante en 1975 y a vicealmirante en 1981, y se retiró a mediados de la década de 1980. Murió el 19 de agosto de 1998."
+    ]
+  },
+  {
+    "hook": "En 1962, tres hombres en un submarino soviético tenían que decidir si empezaba la guerra nuclear.",
+    "sections": [
+      {
+        "kind": "hook",
+        "order": 0,
+        "text": "En 1962, tres hombres en un submarino soviético tenían que decidir si empezaba la guerra nuclear."
+      },
+      {
+        "kind": "context",
+        "order": 1,
+        "text": "Vasili Arjípov iba a bordo del B-59 como segundo comandante, durante la crisis de los misiles de Cuba."
+      },
+      {
+        "kind": "development",
+        "order": 2,
+        "text": "Unos destructores estadounidenses lanzaron cargas de profundidad de prácticas. El capitán creyó que la guerra había empezado y preparó el torpedo nuclear."
+      },
+      {
+        "kind": "development",
+        "order": 3,
+        "text": "Lanzarlo exigía el acuerdo de los tres oficiales superiores. Arjípov se negó."
+      },
+      {
+        "kind": "payoff",
+        "order": 4,
+        "text": "Su decisión impidió el uso de armas nucleares. En 2002 lo llamaron el hombre que salvó el mundo. Había muerto en 1998."
+      }
+    ],
+    "notes": [
+      "Reestructuración narrativa propia: el artículo enciclopédico se reordena en gancho, contexto, desarrollo y remate para el formato vertical de 45 segundos.",
+      "Contexto propio agregado: se explicita que la decisión era colegiada y que bastaba una negativa, que es lo que convierte el dato en relato.",
+      "No se incorpora ninguna afirmación ausente del extracto ingerido. No se describen las condiciones a bordo ni la duración de la inmersión, que el extracto no menciona.",
+      "Fuente en inglés bajo CC BY-SA 4.0, ingerida de Wikipedia; la atribución queda en demo/arkhipov/fuente.txt y en el ProvenanceLedger de la corrida."
+    ]
+  }
+]
