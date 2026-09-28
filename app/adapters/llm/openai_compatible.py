@@ -44,6 +44,30 @@ CODIGOS_TRANSITORIOS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 MAX_INTENTOS = 4
 BACKOFF_BASE_S = 2.0
 
+#: Qué significa cada rechazo que no se reintenta, para no mandar a revisar lo
+#: que está bien.
+#:
+#: Sin esto los cuatro casos llegan como «rechazó la petición con 4xx», y los
+#: cuatro tienen remedios distintos e incompatibles: cambiar la clave, pagar,
+#: cambiar de modelo o corregir el identificador. El texto sale de la tabla de
+#: errores que publica OpenRouter, y es el mismo contrato en los demás
+#: proveedores compatibles. El 401 se trata aparte porque su mensaje nombra la
+#: variable de entorno del proveedor concreto, y eso no cabe en un texto fijo.
+MOTIVOS_PERMANENTES = {
+    402: (
+        "la cuenta o la clave no tienen saldo; en un modelo gratuito suele "
+        "significar que se agotó su cupo diario"
+    ),
+    403: (
+        "petición prohibida: permisos insuficientes, o el modelo moderó la "
+        "entrada y la marcó"
+    ),
+    404: (
+        "el recurso no existe; lo habitual es que LLM_MODEL no sea un "
+        "identificador válido de este proveedor"
+    ),
+}
+
 
 class ProveedorOpenAICompatible(ProveedorLLM):
     """Cliente de Chat Completions para cualquier proveedor compatible."""
@@ -60,6 +84,7 @@ class ProveedorOpenAICompatible(ProveedorLLM):
         temperatura: float = 0.3,
         max_intentos: int = MAX_INTENTOS,
         max_tokens: int = 4000,
+        cabeceras_extra: dict[str, str] | None = None,
         dormir=None,
     ) -> None:
         if not base_url:
@@ -68,8 +93,8 @@ class ProveedorOpenAICompatible(ProveedorLLM):
             raise ConfiguracionInvalida("falta LLM_MODEL para el proveedor LLM")
         if not api_key:
             raise ConfiguracionInvalida(
-                "falta LLM_API_KEY en el entorno; la credencial nunca se lee "
-                "del código ni del manifest"
+                f"falta {_variable_credencial(nombre)} en el entorno; la "
+                f"credencial nunca se lee del código ni del manifest"
             )
         self.base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -82,6 +107,9 @@ class ProveedorOpenAICompatible(ProveedorLLM):
         #: Presupuesto por defecto. Las etapas llaman sin indicarlo, así que si
         #: se quedara fijo en el código no habría forma de subirlo sin tocarlo.
         self.max_tokens = max_tokens
+        #: Cabeceras propias del proveedor. Nunca llevan credenciales: la
+        #: autorización va en su sitio y se añade aparte.
+        self.cabeceras_extra = dict(cabeceras_extra or {})
         # Se guarda como atributo y no como valor por defecto del parámetro: un
         # valor por defecto se evalúa al importar, y entonces un test que
         # sustituya ``time.sleep`` no tendría efecto y esperaría de verdad.
@@ -129,6 +157,7 @@ class ProveedorOpenAICompatible(ProveedorLLM):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
+                **self.cabeceras_extra,
             },
             method="POST",
         )
@@ -149,6 +178,21 @@ class ProveedorOpenAICompatible(ProveedorLLM):
             if exc.code in CODIGOS_TRANSITORIOS:
                 raise ErrorTransitorio(
                     f"el proveedor {self.nombre} respondió {exc.code}"
+                ) from exc
+            if exc.code == 401:
+                # Se nombra la variable concreta porque decir solo «401» manda a
+                # revisar también el modelo y la base_url, que no tienen nada
+                # que ver. La clase no cambia: sigue siendo un rechazo
+                # permanente, y por tanto no se reintenta.
+                raise RespuestaInvalida(
+                    f"el proveedor {self.nombre} rechazó la credencial (401): "
+                    f"revisa {_variable_credencial(self.nombre)}. No se "
+                    f"reintenta, porque una clave inválida sigue siéndolo"
+                ) from exc
+            if motivo := MOTIVOS_PERMANENTES.get(exc.code):
+                raise RespuestaInvalida(
+                    f"el proveedor {self.nombre} rechazó la petición con "
+                    f"{exc.code}: {motivo}"
                 ) from exc
             raise RespuestaInvalida(
                 f"el proveedor {self.nombre} rechazó la petición con {exc.code}"
@@ -190,6 +234,18 @@ class ProveedorOpenAICompatible(ProveedorLLM):
                 "--max-caracteres"
             )
         return contenido
+
+
+def _variable_credencial(nombre: str) -> str:
+    """La variable de entorno donde ese proveedor espera su clave.
+
+    Se nombra la que el proveedor entrega, no una genérica: quien saca la clave
+    de OpenRouter la tiene como ``OPENROUTER_API_KEY``, y mandarle a otra
+    variable es mandarle a buscar lo que ya tiene.
+    """
+    if nombre == "openrouter":
+        return "OPENROUTER_API_KEY (o LLM_API_KEY)"
+    return "LLM_API_KEY"
 
 
 def _retry_after(exc: urllib.error.HTTPError) -> float | None:

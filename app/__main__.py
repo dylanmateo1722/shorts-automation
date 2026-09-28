@@ -295,6 +295,11 @@ def _comprobar_llm(settings: Settings) -> int:
         "model": proveedor.modelo,
         "base_url": getattr(proveedor, "base_url", None),
         "max_tokens": getattr(proveedor, "max_tokens", None),
+        # Se muestra porque es la diferencia que más cuesta diagnosticar a
+        # ciegas: con json_mode activo, un modelo que no soporte salidas
+        # estructuradas hace fallar la petición entera en vez de ignorar el
+        # parámetro.
+        "json_mode": getattr(proveedor, "modo_json", None),
     }
 
     try:
@@ -305,9 +310,11 @@ def _comprobar_llm(settings: Settings) -> int:
         resumen["ok"] = False
         resumen["error"] = f"{type(exc).__name__}: {exc.mensaje}"
         print(json.dumps(resumen, indent=2, ensure_ascii=False))
+        # No se repite aquí una lista de variables: el error de arriba ya dice
+        # cuál es el problema, y nombrar las tres manda a revisar dos que
+        # estaban bien.
         print(
-            "\nEl proveedor no respondió correctamente. Revisa LLM_BASE_URL, "
-            "LLM_MODEL y LLM_API_KEY.",
+            f"\nLa comprobación falló: {exc.mensaje}",
             file=sys.stderr,
         )
         return 1

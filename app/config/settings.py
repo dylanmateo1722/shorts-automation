@@ -175,8 +175,16 @@ class Settings:
 
         Es una propiedad y no un campo del dataclass para que no pueda acabar
         por descuido en un ``repr``, en un volcado del manifest ni en un log.
+
+        ``OPENROUTER_API_KEY`` se acepta como alias porque es el nombre con el
+        que OpenRouter la entrega, y obligar a copiarla a otra variable solo
+        añade un paso donde equivocarse. ``LLM_API_KEY`` manda si están las dos.
         """
-        return os.environ.get("LLM_API_KEY", "")
+        if clave := os.environ.get("LLM_API_KEY", "").strip():
+            return clave
+        if self.llm_provider.lower() == "openrouter":
+            return os.environ.get("OPENROUTER_API_KEY", "").strip()
+        return ""
 
     # --- YouTube (Gate 7.1) ------------------------------------------------
     #

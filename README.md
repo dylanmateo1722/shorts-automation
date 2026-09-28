@@ -1441,8 +1441,11 @@ export TTS_PROVIDER=edge          # o "fake" para no salir a la red
 ```
 
 Con un proveedor de lenguaje real, basta cambiar `LLM_PROVIDER`, `LLM_MODEL`,
-`LLM_BASE_URL` y `LLM_API_KEY`. La credencial se lee **solo** del entorno.
-Edge TTS no necesita ninguna.
+`LLM_BASE_URL` y `LLM_API_KEY`. Con OpenRouter sobran dos de esas cuatro:
+`LLM_PROVIDER=openrouter` y `OPENROUTER_API_KEY` bastan, porque su `base_url` se
+conoce y la clave se acepta con el nombre que él la entrega. La credencial se lee
+**solo** del entorno. Edge TTS no necesita ninguna. El detalle está en
+`CONFIGURACION.md`.
 
 No hay comando `resume`: reanudar es ejecutar `run` con el mismo `--run-id`.
 Una etapa cuyo artefacto siga siendo válido se omite, **sin volver a llamar al
