@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
 
 from app.adapters.llm.base import ProveedorLLM
 from app.core.errors import (
     ConfiguracionInvalida,
+    ErrorPipeline,
     ErrorTransitorio,
     LimiteDeTasa,
     RespuestaInvalida,
@@ -32,6 +34,15 @@ RUTA_COMPLETIONS = "/chat/completions"
 # Códigos que merecen reintento: el servidor no dijo que la petición esté mal,
 # dijo que ahora no puede.
 CODIGOS_TRANSITORIOS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+#: Reintentos ante un fallo transitorio, y base del backoff exponencial.
+#:
+#: Existen porque sin ellos un solo 429 tira la corrida entera. Contra una API
+#: real el límite de tasa no es una anomalía: es lo que pasa cuando dos
+#: peticiones caen juntas. Y el coste de rendirse es alto, porque para cuando
+#: se llama al modelo ya se ingirió la fuente y el resto del pipeline espera.
+MAX_INTENTOS = 4
+BACKOFF_BASE_S = 2.0
 
 
 class ProveedorOpenAICompatible(ProveedorLLM):
@@ -47,6 +58,9 @@ class ProveedorOpenAICompatible(ProveedorLLM):
         timeout_s: int = 120,
         modo_json: bool = True,
         temperatura: float = 0.3,
+        max_intentos: int = MAX_INTENTOS,
+        max_tokens: int = 4000,
+        dormir=None,
     ) -> None:
         if not base_url:
             raise ConfiguracionInvalida("falta LLM_BASE_URL para el proveedor LLM")
@@ -64,6 +78,14 @@ class ProveedorOpenAICompatible(ProveedorLLM):
         self.timeout_s = timeout_s
         self.modo_json = modo_json
         self.temperatura = temperatura
+        self.max_intentos = max(1, max_intentos)
+        #: Presupuesto por defecto. Las etapas llaman sin indicarlo, así que si
+        #: se quedara fijo en el código no habría forma de subirlo sin tocarlo.
+        self.max_tokens = max_tokens
+        # Se guarda como atributo y no como valor por defecto del parámetro: un
+        # valor por defecto se evalúa al importar, y entonces un test que
+        # sustituya ``time.sleep`` no tendría efecto y esperaría de verdad.
+        self._dormir = dormir or time.sleep
 
     def _cuerpo(self, prompt: str, max_tokens: int) -> dict:
         cuerpo = {
@@ -78,7 +100,29 @@ class ProveedorOpenAICompatible(ProveedorLLM):
             cuerpo["response_format"] = {"type": "json_object"}
         return cuerpo
 
-    def generar_json(self, prompt: str, *, max_tokens: int = 4000) -> dict:
+    def generar_json(self, prompt: str, *, max_tokens: int | None = None) -> dict:
+        """Llama al modelo, reintentando solo lo que tiene sentido reintentar.
+
+        Un 400 no se arregla repitiéndolo; un 429 o un 503 sí. Rendirse ante el
+        segundo tira una corrida en la que ya se ingirió la fuente.
+        """
+        presupuesto = max_tokens or self.max_tokens
+        ultimo: ErrorPipeline | None = None
+        for intento in range(1, self.max_intentos + 1):
+            try:
+                return self._una_llamada(prompt, presupuesto)
+            except (LimiteDeTasa, ErrorTransitorio, TiempoAgotado) as exc:
+                ultimo = exc
+                if intento == self.max_intentos:
+                    break
+                espera = BACKOFF_BASE_S * (2 ** (intento - 1))
+                pedida = getattr(exc, "espera_s", None)
+                if isinstance(pedida, (int, float)) and pedida > 0:
+                    espera = max(espera, float(pedida))
+                self._dormir(espera)
+        raise ultimo
+
+    def _una_llamada(self, prompt: str, max_tokens: int) -> dict:
         peticion = urllib.request.Request(
             f"{self.base_url}{RUTA_COMPLETIONS}",
             data=json.dumps(self._cuerpo(prompt, max_tokens)).encode("utf-8"),
@@ -95,9 +139,13 @@ class ProveedorOpenAICompatible(ProveedorLLM):
         except urllib.error.HTTPError as exc:
             # El cuerpo del error puede repetir la credencial: no se propaga.
             if exc.code == 429:
-                raise LimiteDeTasa(
+                limite = LimiteDeTasa(
                     f"el proveedor {self.nombre} aplicó límite de tasa (429)"
-                ) from exc
+                )
+                # Muchos proveedores dicen cuánto esperar. Respetarlo es más
+                # eficaz —y más educado— que insistir con nuestro propio ritmo.
+                limite.espera_s = _retry_after(exc)
+                raise limite from exc
             if exc.code in CODIGOS_TRANSITORIOS:
                 raise ErrorTransitorio(
                     f"el proveedor {self.nombre} respondió {exc.code}"
@@ -118,11 +166,42 @@ class ProveedorOpenAICompatible(ProveedorLLM):
 
     @staticmethod
     def _extraer_contenido(bruto: str) -> str:
-        """Saca el texto del mensaje de la envoltura de Chat Completions."""
+        """Saca el texto del mensaje de la envoltura de Chat Completions.
+
+        Antes de devolverlo comprueba ``finish_reason``. Si el modelo se quedó
+        sin presupuesto de tokens, el JSON llega cortado a media llave y el
+        error genérico diría «no es JSON válido», que manda a buscar el
+        problema al sitio equivocado: el JSON está mal porque falta, no porque
+        el modelo lo escribiera mal.
+        """
         try:
             datos = json.loads(bruto)
-            return datos["choices"][0]["message"]["content"]
+            eleccion = datos["choices"][0]
+            contenido = eleccion["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise RespuestaInvalida(
                 f"la envoltura de la respuesta no tiene la forma esperada: {exc}"
             ) from exc
+
+        if eleccion.get("finish_reason") == "length":
+            raise RespuestaInvalida(
+                "el modelo agotó el presupuesto de tokens y la respuesta llegó "
+                "cortada; sube LLM_MAX_TOKENS o acorta la fuente con "
+                "--max-caracteres"
+            )
+        return contenido
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """Los segundos que el proveedor pide esperar, si los pide en segundos."""
+    try:
+        bruto = (exc.headers or {}).get("Retry-After")
+    except Exception:  # noqa: BLE001 - unas cabeceras raras no rompen la llamada
+        return None
+    if not bruto:
+        return None
+    try:
+        return max(0.0, float(str(bruto).strip()))
+    except ValueError:
+        # También admite una fecha HTTP; no se interpreta, se usa el backoff.
+        return None

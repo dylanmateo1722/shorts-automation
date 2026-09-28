@@ -63,6 +63,9 @@ class Settings:
     llm_model: str = ""
     llm_base_url: str = ""
     llm_timeout_s: int = 120
+    # Presupuesto de tokens de la respuesta. Si el modelo lo agota, el JSON
+    # llega cortado; el proveedor lo detecta y lo dice con esas palabras.
+    llm_max_tokens: int = 4000
     target_language: str = "es"
     default_wpm: int = WPM_POR_DEFECTO
     translation_prompt_version: str = "v1"
@@ -108,6 +111,7 @@ class Settings:
             llm_model=os.environ.get("LLM_MODEL", "").strip(),
             llm_base_url=os.environ.get("LLM_BASE_URL", "").strip(),
             llm_timeout_s=_entero("LLM_TIMEOUT_S", 120),
+            llm_max_tokens=_entero("LLM_MAX_TOKENS", 4000),
             target_language=os.environ.get("TARGET_LANGUAGE", "es").strip(),
             default_wpm=_entero("DEFAULT_WPM", WPM_POR_DEFECTO),
             translation_prompt_version=os.environ.get(

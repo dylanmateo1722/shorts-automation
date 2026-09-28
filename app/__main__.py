@@ -201,6 +201,12 @@ def _construir_parser() -> argparse.ArgumentParser:
              "del dominio",
     )
 
+    sub.add_parser(
+        "llm-check",
+        help="comprueba que el proveedor de LLM configurado responde y devuelve "
+             "JSON. Hace UNA llamada mínima y no produce ningún Short",
+    )
+
     ingerir = sub.add_parser(
         "ingest",
         help="trae el texto real de una URL y escribe el transcript de partida "
@@ -270,6 +276,51 @@ def _construir_parser() -> argparse.ArgumentParser:
 #: Es una palabra concreta y no un ``--yes`` porque teclearla es un acto, y una
 #: publicación no debería poder salir de haber repetido un comando sin leerlo.
 CONFIRMACION = "SUBIR"
+
+
+def _comprobar_llm(settings: Settings) -> int:
+    """Una llamada mínima al modelo, para saber si la credencial sirve.
+
+    Existe porque descubrir que la clave está mal a mitad de una corrida es
+    caro: para entonces ya se ingirió la fuente y se va a tirar el trabajo. Una
+    llamada de dos tokens responde la misma pregunta en un segundo.
+
+    No imprime la credencial ni ningún fragmento de ella.
+    """
+    from app.adapters.llm import construir_proveedor
+
+    proveedor = construir_proveedor(settings)
+    resumen = {
+        "provider": proveedor.nombre,
+        "model": proveedor.modelo,
+        "base_url": getattr(proveedor, "base_url", None),
+        "max_tokens": getattr(proveedor, "max_tokens", None),
+    }
+
+    try:
+        datos = proveedor.generar_json(
+            'Responde exactamente con este objeto JSON y nada más: {"ok": true}'
+        )
+    except ErrorPipeline as exc:
+        resumen["ok"] = False
+        resumen["error"] = f"{type(exc).__name__}: {exc.mensaje}"
+        print(json.dumps(resumen, indent=2, ensure_ascii=False))
+        print(
+            "\nEl proveedor no respondió correctamente. Revisa LLM_BASE_URL, "
+            "LLM_MODEL y LLM_API_KEY.",
+            file=sys.stderr,
+        )
+        return 1
+
+    resumen["ok"] = True
+    resumen["respuesta"] = datos
+    print(json.dumps(resumen, indent=2, ensure_ascii=False))
+    print(
+        "\nEl proveedor responde y devuelve JSON. Ya puedes ejecutar "
+        "'app short <url>' sin respuestas preparadas.",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def _producir(args: argparse.Namespace, settings: Settings) -> int:
@@ -487,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.comando
             in (
                 "ingest",
+                "llm-check",
                 "short",
                 "publish",
                 "youtube-auth",
@@ -561,6 +613,9 @@ def main(argv: list[str] | None = None) -> int:
             # Y el mismo criterio de código de salida, por el mismo motivo:
             # ``autenticado`` también es cierto para WRONG_CHANNEL.
             return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
+
+        if args.comando == "llm-check":
+            return _comprobar_llm(settings)
 
         if args.comando == "short":
             return _producir(args, settings)

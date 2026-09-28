@@ -45,9 +45,16 @@ ante una errata, no para restringir.
 **PRUEBA QUE SE EJECUTARÁ:**
 
 ```bash
+# 1. Comprobar la credencial en una sola llamada, sin gastar una corrida.
+uv run python -m app llm-check
+
+# 2. Si responde, el Short completo.
 uv run python -m app short "https://en.wikipedia.org/wiki/Stanislav_Petrov" \
     --max-caracteres 700 --look frio
 ```
+
+`llm-check` existe porque descubrir que la clave está mal a mitad de una corrida
+es caro: para entonces ya se ingirió la fuente y se va a tirar el trabajo.
 
 Si la respuesta del modelo pierde una cifra del original, inventa una que no
 estaba, no está en español o no es subtitulable, el pipeline la **rechaza** y
@@ -70,6 +77,33 @@ ejemplos en `demo/respuestas/`.
 
 Esto es un andamio de desarrollo, no el producto: cada pieza nueva necesita sus
 propias respuestas, y por eso la credencial es la prioridad.
+
+### Qué está ya verificado del cliente real
+
+El cliente de Chat Completions —el mismo código que hablará con OpenAI o
+DeepSeek— está probado contra un servidor HTTP real: el POST, la cabecera de
+autorización, la envoltura de la respuesta, el JSON entre vallas, el
+truncamiento y el reintento ante 429 y 5xx. Lo único sin verificar es el modelo
+remoto.
+
+Para reproducirlo sin credencial:
+
+```bash
+scripts/servidor_llm_local.py --respuestas demo/respuestas/petrov.json &
+export LLM_PROVIDER=openai_compatible
+export LLM_BASE_URL=http://127.0.0.1:8099/v1
+export LLM_MODEL=servidor-local
+export LLM_API_KEY=no-es-una-credencial-real
+uv run python -m app short "https://en.wikipedia.org/wiki/Stanislav_Petrov" --max-caracteres 700
+```
+
+Eso recorre el cliente real de punta a punta. Cambiar a un proveedor de verdad
+es cambiar `LLM_BASE_URL`, `LLM_MODEL` y `LLM_API_KEY`; nada más.
+
+### Si una fuente larga agota el presupuesto de tokens
+
+`LLM_MAX_TOKENS` (4000 por defecto). Si el modelo lo agota, el JSON llega
+cortado y el error lo dice con esas palabras, en vez de culpar al formato.
 
 ---
 

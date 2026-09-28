@@ -55,6 +55,7 @@ def construir_proveedor(settings) -> ProveedorLLM:
             modelo=settings.llm_model,
             nombre=nombre,
             timeout_s=settings.llm_timeout_s,
+            max_tokens=settings.llm_max_tokens,
             modo_json=os.environ.get("LLM_JSON_MODE", "1") != "0",
         )
 
