@@ -1,0 +1,36 @@
+FUENTE REAL EN INGLÉS — pieza de demostración de Shorts Automation
+=================================================================
+
+Obra:        «Stanislav Petrov», Wikipedia, la enciclopedia libre
+URL:         https://en.wikipedia.org/wiki/Stanislav_Petrov
+Licencia:    Creative Commons Attribution-ShareAlike 4.0 International
+             (CC BY-SA 4.0) — https://creativecommons.org/licenses/by-sa/4.0/
+Autoría:     colaboradores de Wikipedia
+Consultado:  2026-09-28
+Uso:         extracto textual, traducido y adaptado al español. La licencia
+             exige atribución y compartir igual; ambas cosas se registran en el
+             ProvenanceLedger de la corrida con base de licencia `cc_by`.
+
+Extracto utilizado (verbatim, en inglés)
+---------------------------------------
+
+Stanislav Yevgrafovich Petrov was a Russian lieutenant colonel of the Soviet
+Air Defence Forces who played a key role in the 1983 Soviet nuclear false alarm
+incident. On 26 September 1983, Petrov was the duty officer at the command
+center for the Oko nuclear early-warning system when the system reported that a
+missile had been launched from the United States, followed by up to four more.
+
+Petrov, suspecting a false alarm, decided to wait for a confirmation that never
+came, and declared the system's indication a false alarm. He had been told a
+U.S. strike would be all-out, so a mere five missiles seemed an illogical
+start. The launch detection system was new and, in his view, not yet wholly
+trustworthy. Ground radar failed to pick up corroborating evidence, even after
+minutes of delay.
+
+Nota sobre el alcance de la afirmación
+-------------------------------------
+
+Solo se usa lo que este extracto dice. El artículo completo recoge más
+detalles —entre ellos la causa técnica que se determinó después— que **no** se
+incorporan al guion, porque no se verificaron contra la fuente en esta
+ejecución. Un microdocumental no afirma lo que no comprobó.

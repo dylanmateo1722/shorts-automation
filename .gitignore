@@ -18,6 +18,19 @@ evidence/*.json
 vendor/moneyprinterturbo/storage/
 vendor/moneyprinterturbo/models/
 
+# Motor de render propio: el CLI se versiona, lo que genera no.
+# El .venv es un enlace al intérprete del proyecto, que lo crea setup_engine.sh.
+engine/storage/
+engine/config.toml
+# Sin barra final: es un enlace simbólico, no un directorio, y un patrón con
+# barra solo casaría un directorio. Versionarlo guardaría una ruta absoluta de
+# la máquina que lo creó.
+engine/.venv
+
+# Material generado de la demo: lo reproduce scripts/generar_material.py a
+# partir de la declaración que sí se versiona, así que no se versiona el MP4.
+demo/material/
+
 # Pruebas
 .pytest_cache/
 tests/motor_falso/storage/
