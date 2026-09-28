@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,6 +50,8 @@ from html.parser import HTMLParser
 
 from app.core.errors import (
     EntradaInvalida,
+    ErrorPipeline,
+    LimiteDeTasa,
     ProveedorNoDisponible,
     RespuestaInvalida,
     TiempoAgotado,
@@ -145,13 +148,34 @@ class DocumentoFuente:
 # ---------------------------------------------------------------------------
 
 
-def _pedir(url: str, *, timeout_s: int) -> bytes:
+#: Reintentos ante un fallo transitorio, y cuánto se espera entre ellos. Son
+#: pocos y cortos a propósito: la ingesta es interactiva, y un usuario prefiere
+#: un error claro en diez segundos a un éxito en dos minutos.
+MAX_INTENTOS = 3
+ESPERA_BASE_S = 2.0
+
+
+def _peticion_unica(url: str, *, timeout_s: int) -> bytes:
+    """Una sola petición, traduciendo el fallo al error del dominio que toca.
+
+    La distinción no es cosmética: un 404 no se arregla repitiéndolo y un 429
+    sí. Tratar ambos igual haría que la ingesta se rindiera ante un límite de
+    tasa, o que insistiera contra un artículo que no existe.
+    """
     peticion = urllib.request.Request(url, headers={"User-Agent": AGENTE})
     try:
         with urllib.request.urlopen(peticion, timeout=timeout_s) as respuesta:
             return respuesta.read()
     except urllib.error.HTTPError as exc:
-        # 4xx es culpa de la petición; 5xx es del servidor y puede reintentarse.
+        if exc.code in (408, 429):
+            limite = LimiteDeTasa(
+                f"la fuente limitó la petición ({exc.code}) para {url}",
+                stage="ingest",
+            )
+            # Se cuelga del error lo que el servidor pidió esperar, para que
+            # quien reintente no tenga que volver a leer las cabeceras.
+            limite.espera_s = _retry_after(exc)
+            raise limite from exc
         if 500 <= exc.code < 600:
             raise ProveedorNoDisponible(
                 f"la fuente devolvió {exc.code} para {url}", stage="ingest"
@@ -167,6 +191,53 @@ def _pedir(url: str, *, timeout_s: int) -> bytes:
         raise ProveedorNoDisponible(
             f"no se pudo alcanzar {url}: {exc.reason}", stage="ingest"
         ) from exc
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """El ``Retry-After`` que pida el servidor, si lo pide en segundos.
+
+    Se respeta cuando existe: esperar lo que el servidor dice es más educado —y
+    más eficaz— que insistir con nuestro propio ritmo.
+    """
+    try:
+        bruto = (exc.headers or {}).get("Retry-After")
+    except Exception:  # noqa: BLE001 - unas cabeceras raras no deben romper nada
+        return None
+    if not bruto:
+        return None
+    try:
+        return max(0.0, float(str(bruto).strip()))
+    except ValueError:
+        # También admite una fecha HTTP; no se interpreta, se usa el backoff.
+        return None
+
+
+def _pedir(
+    url: str, *, timeout_s: int, dormir=None, max_intentos: int = MAX_INTENTOS
+) -> bytes:
+    """Pide la URL, reintentando solo lo que tiene sentido reintentar.
+
+    ``dormir`` se resuelve al llamar y no como valor por defecto: un valor por
+    defecto se evalúa al importar el módulo, y entonces un test que sustituya
+    ``time.sleep`` después no tendría ningún efecto y la suite esperaría de
+    verdad los segundos del backoff.
+    """
+    dormir = dormir or time.sleep
+    ultimo: ErrorPipeline | None = None
+    for intento in range(1, max_intentos + 1):
+        try:
+            return _peticion_unica(url, timeout_s=timeout_s)
+        except (LimiteDeTasa, ProveedorNoDisponible, TiempoAgotado) as exc:
+            ultimo = exc
+            if intento == max_intentos:
+                break
+            espera = ESPERA_BASE_S * (2 ** (intento - 1))
+            if isinstance(exc, LimiteDeTasa):
+                pedida = getattr(exc, "espera_s", None)
+                if isinstance(pedida, (int, float)) and pedida > 0:
+                    espera = max(espera, float(pedida))
+            dormir(espera)
+    raise ultimo
 
 
 def _limpiar(texto: str) -> str:

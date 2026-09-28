@@ -20,6 +20,7 @@ idempotencia debe poder reutilizar el intermedio.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from app.adapters.composicion import NOMBRE_COMPOSICION, componer
 from app.adapters.media import binario_ffmpeg, inspeccionar, sha256_archivo
@@ -55,6 +56,7 @@ from app.pipeline.transformation import (
     material_seleccionado,
     resolver_material,
 )
+from app.subtitles.serializers import sin_cues_dentro_de
 from app.pipeline.voice import (
     ARTEFACTO_GUION,
     ARTEFACTO_SUBTITULOS,
@@ -379,6 +381,42 @@ def job_vigente(artefacto: RenderJob, ctx: ContextoEtapa) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: Dónde se escribe el subtítulo que de verdad se quema, cuando hay que quitarle
+#: los cues que el rótulo ya está mostrando. Es un derivado de la composición, no
+#: una fuente: por eso NO entra en ``assets_de_render`` ni en la procedencia,
+#: igual que no entra el MP4 final.
+RUTA_SUBTITULO_COMPUESTO = "subtitles/subtitles_burn.ass"
+
+
+def _capas_sin_duplicar(ws: Workspace, job: RenderJob) -> list[Path]:
+    """Las capas ASS a quemar, sin que dos muestren el mismo texto a la vez.
+
+    El rótulo es el gancho en grande, y la narración empieza diciendo justo ese
+    gancho, así que sin esto el subtítulo repite debajo, palabra por palabra, lo
+    que el rótulo ya enseña arriba. Se ve como un fallo porque lo es.
+
+    Cuando hay rótulo, se quema una copia del subtítulo sin los cues que caen
+    enteros dentro de su ventana. El artefacto de subtítulos no se toca: sigue
+    siendo la transcripción completa, que es para lo que existe.
+    """
+    if not job.subtitle_path:
+        return [ws.ruta(job.overlay_path)] if job.overlay_path else []
+    if not job.overlay_path:
+        return [ws.ruta(job.subtitle_path)]
+
+    overlay = ws.leer_artefacto(ARTEFACTO_OVERLAY, OverlaySpec)
+    original = ws.ruta(job.subtitle_path)
+    recortado = sin_cues_dentro_de(
+        original.read_text(encoding="utf-8"),
+        overlay.start_seconds,
+        overlay.end_seconds,
+    )
+    destino = ws.ruta(RUTA_SUBTITULO_COMPUESTO)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text(recortado, encoding="utf-8")
+    return [destino, ws.ruta(job.overlay_path)]
+
+
 def componer_final(ctx: ContextoEtapa) -> RenderResult:
     """Superpone subtítulos y overlay sobre el vídeo del motor."""
     ws: Workspace = ctx.workspace
@@ -391,7 +429,7 @@ def componer_final(ctx: ContextoEtapa) -> RenderResult:
             stage="composition",
         )
 
-    capas = [ws.ruta(r) for r in (job.subtitle_path, job.overlay_path) if r]
+    capas = _capas_sin_duplicar(ws, job)
     destino = ws.ruta(job.output_path or RUTA_FINAL)
     resultado = componer(
         entrada=ws.ruta(render.output_path), capas_ass=capas, salida=destino

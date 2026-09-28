@@ -1,0 +1,48 @@
+[
+  {
+    "text": "Vasili Aleksándrovich Arjípov (en ruso: Василий Александрович Архипов; 30 de enero de 1926 – 19 de agosto de 1998), también transliterado como Vasily Arkhipov, fue un vicealmirante de la Armada Soviética. Se le recuerda sobre todo por haber evitado una guerra nuclear durante la crisis de los misiles de Cuba en 1962.\n\nEn el momento de la crisis, Arjípov era jefe de estado mayor de una flotilla de submarinos soviéticos y estaba a bordo del submarino B-59 como segundo comandante. Cuando unos destructores estadounidenses lanzaron cargas de profundidad de prácticas cerca del submarino, su capitán y el oficial político creyeron que la guerra había empezado y se prepararon para lanzar un torpedo nuclear contra buques de la Armada de los Estados Unidos. Sin embargo, la autorización de lanzamiento exigía el acuerdo de los tres oficiales superiores. Arjípov se negó, y su decisión impidió el uso de armas nucleares.\n\nEn 2002, Thomas S. Blanton, director del National Security Archive de la Universidad George Washington, dijo:",
+    "segments": [
+      "Vasili Aleksándrovich Arjípov (30 de enero de 1926 – 19 de agosto de 1998) fue un vicealmirante de la Armada Soviética, recordado por haber evitado una guerra nuclear durante la crisis de los misiles de Cuba en 1962.",
+      "En el momento de la crisis era jefe de estado mayor de una flotilla de submarinos soviéticos y estaba a bordo del submarino B-59 como segundo comandante.",
+      "Cuando unos destructores estadounidenses lanzaron cargas de profundidad de prácticas, su capitán y el oficial político creyeron que la guerra había empezado y se prepararon para lanzar un torpedo nuclear.",
+      "La autorización de lanzamiento exigía el acuerdo de los tres oficiales superiores. Arjípov se negó, y su decisión impidió el uso de armas nucleares.",
+      "En 2002, Thomas S. Blanton, director del National Security Archive, dijo:"
+    ]
+  },
+  {
+    "hook": "En 1962, un solo oficial impidió que se lanzara un torpedo nuclear.",
+    "sections": [
+      {
+        "kind": "hook",
+        "order": 0,
+        "text": "En 1962, un solo oficial impidió que se lanzara un torpedo nuclear."
+      },
+      {
+        "kind": "context",
+        "order": 1,
+        "text": "Vasili Arjípov iba a bordo del submarino soviético B-59, durante la crisis de los misiles de Cuba."
+      },
+      {
+        "kind": "development",
+        "order": 2,
+        "text": "Unos destructores estadounidenses lanzaron cargas de profundidad de prácticas. El capitán creyó que la guerra había empezado."
+      },
+      {
+        "kind": "development",
+        "order": 3,
+        "text": "Prepararon el torpedo nuclear. Pero lanzarlo exigía el acuerdo de los tres oficiales superiores, y Arjípov se negó."
+      },
+      {
+        "kind": "payoff",
+        "order": 4,
+        "text": "Su decisión impidió el uso de armas nucleares. En 2002, el director del National Security Archive lo recordó en público."
+      }
+    ],
+    "notes": [
+      "Reestructuración narrativa propia: el artículo enciclopédico se reordena en gancho, contexto, desarrollo y remate para el formato vertical.",
+      "Contexto propio agregado: se explicita que la decisión era colegiada y que bastaba una negativa, que es lo que convierte el dato en relato.",
+      "No se incorpora ninguna afirmación ausente del texto ingerido. En particular no se cita la frase de Blanton, porque el extracto se corta antes de recogerla.",
+      "Fuente en inglés bajo CC BY-SA 4.0, ingerida de Wikipedia; la atribución queda en source/fuente.txt de la corrida."
+    ]
+  }
+]

@@ -19,6 +19,7 @@ import pytest
 from app.adapters import fuente as F
 from app.contracts.models import Transcript
 from app.core.errors import (
+    LimiteDeTasa,
     EntradaInvalida,
     ProveedorNoDisponible,
     RespuestaInvalida,
@@ -218,6 +219,7 @@ def test_un_5xx_es_transitorio_y_un_4xx_no(monkeypatch):
 
         return _urlopen
 
+    monkeypatch.setattr(F.time, "sleep", lambda _s: None)
     monkeypatch.setattr(urllib.request, "urlopen", lanzar(503))
     with pytest.raises(ProveedorNoDisponible):
         F.ingerir(URL_WIKI)
@@ -227,6 +229,81 @@ def test_un_5xx_es_transitorio_y_un_4xx_no(monkeypatch):
         F.ingerir(URL_WIKI)
 
 
+def test_un_429_es_un_limite_de_tasa_y_se_reintenta(monkeypatch):
+    """El caso que se encontró en producción.
+
+    Wikipedia devolvió 429 en una ingesta real y la ingesta se rindió, porque
+    todo 4xx se trataba como error permanente de entrada. Un 404 no se arregla
+    repitiéndolo; un 429 sí, y confundirlos hace que el sistema se dé por
+    vencido ante algo que solo pedía esperar.
+    """
+    import urllib.error
+    import urllib.request
+
+    intentos = {"n": 0}
+
+    def _urlopen(peticion, timeout=None):
+        intentos["n"] += 1
+        if intentos["n"] < 3:
+            raise urllib.error.HTTPError(
+                peticion.full_url, 429, "slow down", {"Retry-After": "0"}, None
+            )
+        class _R:
+            def read(self):
+                return _respuesta_wiki()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return _R()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(F.time, "sleep", lambda _s: None)
+
+    doc = F.ingerir(URL_WIKI)
+
+    assert intentos["n"] == 3, "no reintentó ante el límite de tasa"
+    assert doc.title == "Stanislav Petrov"
+
+
+def test_un_429_persistente_acaba_fallando_como_limite_de_tasa(monkeypatch):
+    """Reintentar es acotado: no se insiste para siempre."""
+    import urllib.error
+    import urllib.request
+
+    intentos = {"n": 0}
+
+    def _urlopen(peticion, timeout=None):
+        intentos["n"] += 1
+        raise urllib.error.HTTPError(peticion.full_url, 429, "no", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(F.time, "sleep", lambda _s: None)
+
+    with pytest.raises(LimiteDeTasa):
+        F.ingerir(URL_WIKI)
+    assert intentos["n"] == F.MAX_INTENTOS
+
+
+def test_un_404_no_se_reintenta(monkeypatch):
+    """Insistir contra un artículo que no existe solo gasta tiempo."""
+    import urllib.error
+    import urllib.request
+
+    intentos = {"n": 0}
+
+    def _urlopen(peticion, timeout=None):
+        intentos["n"] += 1
+        raise urllib.error.HTTPError(peticion.full_url, 404, "no", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(F.time, "sleep", lambda _s: None)
+
+    with pytest.raises(EntradaInvalida):
+        F.ingerir(URL_WIKI)
+    assert intentos["n"] == 1
+
+
 def test_una_red_inalcanzable_es_transitoria(monkeypatch):
     import urllib.error
     import urllib.request
@@ -234,6 +311,7 @@ def test_una_red_inalcanzable_es_transitoria(monkeypatch):
     def _urlopen(peticion, timeout=None):
         raise urllib.error.URLError("sin ruta al host")
 
+    monkeypatch.setattr(F.time, "sleep", lambda _s: None)
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
     with pytest.raises(ProveedorNoDisponible):
         F.ingerir(URL_WIKI)

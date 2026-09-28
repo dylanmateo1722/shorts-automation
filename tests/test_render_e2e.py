@@ -653,7 +653,34 @@ def test_el_manifest_registra_la_huella_del_video_final(runner):
 
     assert len(metadata["sha256"]) == 64
     assert metadata["resolution"] == "1080x1920"
-    assert metadata["layers"] == ["subtitles.ass", "overlay.ass"]
+    # La capa de subtítulos que se quema es la copia recortada, no el artefacto:
+    # mientras el rótulo enseña el gancho, el subtítulo no lo repite debajo.
+    assert metadata["layers"] == ["subtitles_burn.ass", "overlay.ass"]
+
+
+def test_el_subtitulo_quemado_no_repite_lo_que_el_rotulo_ya_muestra(runner):
+    """El artefacto queda completo; lo que se quema, recortado.
+
+    Son dos cosas distintas y tienen que seguir siéndolo: el .ass y el .srt de
+    la corrida son la transcripción íntegra —para reutilizarla, revisarla o
+    subirla como pista— y la copia que entra al vídeo es la que evita que el
+    mismo texto aparezca dos veces a la vez.
+    """
+    _todo(runner)
+    ws = runner.workspace
+
+    completo = ws.ruta("subtitles/subtitles.ass").read_text(encoding="utf-8")
+    quemado = ws.ruta("subtitles/subtitles_burn.ass").read_text(encoding="utf-8")
+
+    cues = lambda t: [l for l in t.splitlines() if l.startswith("Dialogue")]  # noqa: E731
+    assert len(cues(quemado)) < len(cues(completo)), (
+        "no se quitó ningún cue: el rótulo y el subtítulo siguen duplicándose"
+    )
+    # El primer cue del artefacto es el del gancho, y es el que sobra.
+    assert cues(completo)[0] not in cues(quemado)
+    # Y no se ha tocado nada más: el resto sigue igual y en el mismo orden.
+    assert cues(quemado) == cues(completo)[len(cues(completo)) - len(cues(quemado)):]
+    assert quemado.startswith("[Script Info]")
 
 
 def test_el_manifest_del_render_no_guarda_secretos(runner, monkeypatch):

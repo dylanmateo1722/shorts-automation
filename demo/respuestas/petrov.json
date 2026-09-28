@@ -1,0 +1,48 @@
+[
+  {
+    "text": "Stanislav Yevgráfovich Petrov (en ruso: Станислав Евграфович Петров; 7 de septiembre de 1939 – 19 de mayo de 2017) fue un teniente coronel ruso de las Fuerzas de Defensa Aérea Soviéticas que desempeñó un papel clave en el incidente de la falsa alarma nuclear soviética de 1983. El 26 de septiembre de 1983, Petrov era el oficial de guardia en el centro de mando del sistema de alerta temprana nuclear Oko cuando el sistema informó de que se había lanzado un misil desde los Estados Unidos, seguido de hasta cuatro más. Petrov juzgó correctamente que los informes eran una falsa alarma.\n\nSu decisión de desobedecer las órdenes, contra el protocolo militar soviético, se considera que evitó un ataque nuclear de represalia erróneo contra los Estados Unidos y sus aliados de la OTAN, que probablemente habría desembocado en una guerra nuclear a gran escala. Una investigación posterior confirmó que el sistema de alerta por satélite soviético había fallado. Como su decisión pudo evitar un ataque nuclear de represalia, a menudo se dice que Petrov «salvó el mundo».",
+    "segments": [
+      "Stanislav Yevgráfovich Petrov (7 de septiembre de 1939 – 19 de mayo de 2017) fue un teniente coronel ruso de las Fuerzas de Defensa Aérea Soviéticas, clave en el incidente de la falsa alarma nuclear soviética de 1983.",
+      "El 26 de septiembre de 1983 era el oficial de guardia del sistema de alerta temprana nuclear Oko cuando el sistema informó de un misil lanzado desde los Estados Unidos, seguido de hasta cuatro más.",
+      "Petrov juzgó correctamente que los informes eran una falsa alarma.",
+      "Su decisión de desobedecer las órdenes evitó un ataque nuclear de represalia contra los Estados Unidos y sus aliados de la OTAN.",
+      "Una investigación posterior confirmó que el sistema de alerta por satélite soviético había fallado, y a menudo se dice que Petrov «salvó el mundo»."
+    ]
+  },
+  {
+    "hook": "En 1983, un hombre desobedeció una orden y evitó una guerra nuclear.",
+    "sections": [
+      {
+        "kind": "hook",
+        "order": 0,
+        "text": "En 1983, un hombre desobedeció una orden y evitó una guerra nuclear."
+      },
+      {
+        "kind": "context",
+        "order": 1,
+        "text": "Stanislav Petrov era el oficial de guardia del sistema de alerta temprana soviético."
+      },
+      {
+        "kind": "development",
+        "order": 2,
+        "text": "El 26 de septiembre, el sistema avisó de un misil lanzado desde Estados Unidos. Después, de cuatro más."
+      },
+      {
+        "kind": "development",
+        "order": 3,
+        "text": "El protocolo era claro: informar, y dejar que arriba decidieran la represalia. Petrov juzgó que era una falsa alarma."
+      },
+      {
+        "kind": "payoff",
+        "order": 4,
+        "text": "Una investigación confirmó después que el sistema de satélites había fallado. Petrov tenía razón, y por eso se dice que salvó el mundo."
+      }
+    ],
+    "notes": [
+      "Reestructuración narrativa propia: el artículo enciclopédico se reordena en gancho, contexto, desarrollo y remate para el formato vertical.",
+      "Contexto propio agregado: se explicita en qué consistía el protocolo, que es lo que convierte la decisión en relato.",
+      "No se incorpora ninguna afirmación ausente del texto ingerido.",
+      "Fuente en inglés bajo CC BY-SA 4.0, ingerida de Wikipedia; la atribución queda en source/fuente.txt de la corrida."
+    ]
+  }
+]

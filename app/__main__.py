@@ -172,6 +172,35 @@ def _construir_parser() -> argparse.ArgumentParser:
              "pide token ni se envía un byte",
     )
 
+    produccion = sub.add_parser(
+        "short",
+        help="de una URL a un Short listo para revisar, en un solo comando: "
+             "ingiere, traduce, adapta, narra, genera el material, compone y "
+             "pasa la QA. No publica",
+    )
+    produccion.add_argument("url", help="URL de la fuente en inglés")
+    produccion.add_argument(
+        "--run-id", default=None,
+        help="UUID de la corrida; se genera uno si se omite",
+    )
+    produccion.add_argument(
+        "--duracion", type=float, default=45.0, metavar="SEGUNDOS",
+        help="duración objetivo del guion (por defecto: 45)",
+    )
+    produccion.add_argument(
+        "--look", default="frio", metavar="PALETA",
+        help="paleta del material visual: frio, calido o neutro",
+    )
+    produccion.add_argument(
+        "--max-caracteres", type=int, default=None, metavar="N",
+        help="cuánto texto traer de la fuente. Se corta por párrafos completos",
+    )
+    produccion.add_argument(
+        "--idioma", default="en", metavar="CODIGO",
+        help="idioma de la fuente, para webs genéricas. En Wikipedia se deduce "
+             "del dominio",
+    )
+
     ingerir = sub.add_parser(
         "ingest",
         help="trae el texto real de una URL y escribe el transcript de partida "
@@ -241,6 +270,54 @@ def _construir_parser() -> argparse.ArgumentParser:
 #: Es una palabra concreta y no un ``--yes`` porque teclearla es un acto, y una
 #: publicación no debería poder salir de haber repetido un comando sin leerlo.
 CONFIRMACION = "SUBIR"
+
+
+def _producir(args: argparse.Namespace, settings: Settings) -> int:
+    """``app short <url>``: el camino completo, sin pasos manuales."""
+    from app.pipeline.produccion import producir_short
+
+    resultado = producir_short(
+        args.url,
+        settings=settings,
+        run_id=parsear_run_id(args.run_id) if args.run_id else None,
+        duracion_objetivo_s=args.duracion,
+        look=args.look,
+        max_caracteres=args.max_caracteres,
+        idioma_fuente=args.idioma,
+    )
+
+    print(
+        json.dumps(
+            {
+                "run_id": str(resultado.run_id),
+                "source_url": resultado.documento.url,
+                "source_title": resultado.documento.title,
+                "source_license": resultado.documento.license_id,
+                "short": str(resultado.short),
+                "width": resultado.ancho,
+                "height": resultado.alto,
+                "duration_s": resultado.duracion_s,
+                "sha256": resultado.sha256,
+                "qa_frames": str(resultado.directorio / "qa" / "contact_sheet.png"),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+    if not resultado.licencia_consta:
+        print(
+            "\nAVISO: la fuente no declara licencia de forma legible. El texto "
+            "entró solo como referencia y quedó bloqueado para el render, pero "
+            "antes de publicar hay que comprobarla a mano.",
+            file=sys.stderr,
+        )
+    print(
+        "\nEl Short NO está publicado. Revísalo y, si procede, publícalo con "
+        "'app publish'.",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def _ingerir(args: argparse.Namespace) -> int:
@@ -410,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.comando
             in (
                 "ingest",
+                "short",
                 "publish",
                 "youtube-auth",
                 "youtube-auth-bootstrap",
@@ -483,6 +561,9 @@ def main(argv: list[str] | None = None) -> int:
             # Y el mismo criterio de código de salida, por el mismo motivo:
             # ``autenticado`` también es cierto para WRONG_CHANNEL.
             return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
+
+        if args.comando == "short":
+            return _producir(args, settings)
 
         if args.comando == "ingest":
             return _ingerir(args)
