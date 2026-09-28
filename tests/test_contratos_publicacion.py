@@ -117,9 +117,11 @@ def _resultado(**extra) -> PublishResult:
 def test_los_tres_contratos_validan_y_declaran_su_version():
     for artefacto in (_metadata(), _job(), _resultado()):
         # "1.1" lo subió Gate 7.2 al añadir la referencia a la sesión de subida
-        # y el resultado de la reconciliación. Es aditivo: un artefacto "1.0"
-        # sigue validando porque los campos nuevos son opcionales.
-        assert artefacto.schema_version == SCHEMA_VERSION_PUBLICACION == "1.1"
+        # y el resultado de la reconciliación. "1.2" lo sube Gate 7.4-B al añadir
+        # la declaración de medios sintéticos. Los dos son aditivos: un artefacto
+        # de la versión anterior sigue validando porque los campos nuevos son
+        # opcionales en la base.
+        assert artefacto.schema_version == SCHEMA_VERSION_PUBLICACION == "1.2"
         assert isinstance(artefacto.run_id, uuid.UUID)
         assert artefacto.created_at.tzinfo is not None
 

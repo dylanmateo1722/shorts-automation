@@ -4,6 +4,8 @@
                       [--run-id UUID] [--force STAGE] [--reference-asset RUTA]
                       [--sources ARCHIVO] [--material-asset ASSET_ID]
     python -m app validate <run-id> [--pipeline ...]
+    python -m app publish <run-id> --metadata RUTA --approval RUTA
+                          [--confirmar SUBIR]
     python -m app youtube-auth
     python -m app youtube-auth-bootstrap --credentials RUTA
     python -m app youtube-auth-device --credentials RUTA
@@ -11,6 +13,13 @@
 No existe un comando ``resume`` separado: reanudar es ejecutar ``run`` con el
 mismo ``--run-id``, porque las etapas cuyo artefacto sigue siendo válido se
 omiten solas. Un alias no aportaría nada.
+
+``publish`` es un comando aparte y no una etapa de ``run`` **a propósito**. La
+idempotencia del ``StageRunner`` es «si el artefacto sigue válido se omite, si no
+se re-ejecuta», y re-ejecutar una publicación es subir otra vez; como etapa,
+``run --force publication`` sería un botón de «súbelo de nuevo». Aquí no hay tal
+botón: ``run`` no puede publicar, y ``publish`` sin ``--confirmar SUBIR`` evalúa
+la puerta y se detiene sin tocar la red.
 """
 
 from __future__ import annotations
@@ -19,8 +28,10 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 from app.config.settings import Settings
+from app.contracts.models import EstadoPublicacion
 from app.core.errors import ErrorPipeline
 from app.core.logging import configurar_logging
 from app.core.run_id import nuevo_run_id, parsear_run_id
@@ -136,6 +147,31 @@ def _construir_parser() -> argparse.ArgumentParser:
         help="secuencia con la que se validan los artefactos",
     )
 
+    publicar = sub.add_parser(
+        "publish",
+        help="publica en privado el vídeo editorial de una corrida. Sin "
+             "--confirmar SUBIR evalúa la puerta y se detiene sin tocar la red",
+    )
+    publicar.add_argument("run_id", help="UUID de la corrida ya renderizada")
+    publicar.add_argument(
+        "--metadata", required=True, metavar="RUTA",
+        help="JSON con la metadata editorial. Se valida contra MetadataEditorial: "
+             "la privacidad tiene que ser 'private' y contains_synthetic_media "
+             "tiene que estar declarado. Nada se deriva de otra variable",
+    )
+    publicar.add_argument(
+        "--approval", required=True, metavar="RUTA",
+        help="JSON con la aprobación editorial y legal humana. Sin un "
+             "APPROVED_BY_HUMAN atado a esta corrida, a este vídeo y a este "
+             "material, no se publica",
+    )
+    publicar.add_argument(
+        "--confirmar", default=None, metavar="SUBIR",
+        help="escribe exactamente SUBIR para publicar de verdad. Sin este "
+             "argumento se evalúa la puerta y se informa el veredicto, y no se "
+             "pide token ni se envía un byte",
+    )
+
     sub.add_parser(
         "youtube-auth",
         help="comprueba una autorización de YouTube ya configurada; no sube nada",
@@ -179,6 +215,104 @@ def _construir_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Lo que hay que escribir en ``--confirmar`` para que se suba algo de verdad.
+#: Es una palabra concreta y no un ``--yes`` porque teclearla es un acto, y una
+#: publicación no debería poder salir de haber repetido un comando sin leerlo.
+CONFIRMACION = "SUBIR"
+
+
+def _publicar(args: argparse.Namespace, settings: Settings) -> int:
+    """Gate 7.4-B: publica en privado el vídeo editorial de una corrida.
+
+    Dos fases, y la frontera entre ellas es la red. ``preparar`` lee la corrida,
+    valida las dos declaraciones y evalúa la puerta sin pedir token ni abrir
+    ninguna conexión; solo si la puerta está satisfecha **y** la confirmación es
+    exacta se contacta con YouTube.
+    """
+    from app.adapters.youtube.auth import cargar_credenciales, obtener_access_token
+    from app.adapters.youtube.upload import TransporteUrllib
+    from app.pipeline.publicacion_editorial import preparar, publicar_preparada
+
+    run_id = parsear_run_id(args.run_id)
+    preparacion = preparar(
+        run_id=run_id,
+        directorio_corrida=Path(settings.raiz_runs) / str(run_id),
+        ruta_metadata=Path(args.metadata),
+        ruta_aprobacion=Path(args.approval),
+    )
+
+    # El documento no lleva credenciales por construcción: ni token, ni cabeceras,
+    # ni la URL de la sesión de subida, que además no es representable aquí.
+    veredicto: dict = {
+        "run_id": str(run_id),
+        "gate_ready": preparacion.gate.listo,
+        "gate_reasons": preparacion.gate.motivos,
+        "privacy_status": preparacion.metadata.privacy_status.value,
+        "contains_synthetic_media": preparacion.metadata.contains_synthetic_media,
+        "made_for_kids": preparacion.metadata.made_for_kids,
+        "ai_disclosure_status": preparacion.metadata.ai_disclosure.status.value,
+        "editorial_approval": preparacion.aprobacion.status.value,
+        "editorial_approved_by": preparacion.aprobacion.approved_by,
+        "materials": list(preparacion.render_job.materials),
+        "video_sha256": preparacion.render_result.sha256,
+        "published": False,
+    }
+
+    if not preparacion.gate.listo:
+        print(json.dumps(veredicto, indent=2, ensure_ascii=False))
+        print(f"NOT_READY: {preparacion.gate.resumen}", file=sys.stderr)
+        print("No se ha contactado con YouTube.", file=sys.stderr)
+        return 3
+
+    if args.confirmar != CONFIRMACION:
+        print(json.dumps(veredicto, indent=2, ensure_ascii=False))
+        print(
+            "La puerta está satisfecha y no se ha publicado nada. Para subir el "
+            f"vídeo, repite el comando con --confirmar {CONFIRMACION}.",
+            file=sys.stderr,
+        )
+        return 0
+
+    token = obtener_access_token(
+        cargar_credenciales(settings), timeout_s=settings.youtube_timeout_s
+    )
+    salida = publicar_preparada(
+        preparacion,
+        token=token,
+        transporte=TransporteUrllib(),
+        timeout_s=settings.youtube_timeout_s,
+    )
+
+    veredicto["published"] = salida.publicado
+    veredicto["job_state"] = salida.job.state.value
+    veredicto["job_reason"] = salida.job.reason
+    if salida.result is not None:
+        veredicto["video_id"] = salida.result.video_id
+        veredicto["url"] = salida.result.url
+        veredicto["result_privacy_status"] = (
+            salida.result.privacy_status.value
+            if salida.result.privacy_status
+            else None
+        )
+    print(json.dumps(veredicto, indent=2, ensure_ascii=False))
+
+    if not salida.publicado:
+        print(
+            f"NO se alcanzó COMPLETED ({salida.job.state.value}): "
+            f"{salida.job.reason or 'sin motivo'}",
+            file=sys.stderr,
+        )
+        if salida.job.state is EstadoPublicacion.revision_pendiente:
+            print(
+                "Revisa el canal a mano antes de volver a ejecutar nada: puede "
+                "haber un vídeo subido sin confirmar. No existe salida automática "
+                "de NEEDS_REVIEW, y volver a publicar podría duplicarlo.",
+                file=sys.stderr,
+            )
+        return 5
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _construir_parser()
     args = parser.parse_args(argv)
@@ -192,7 +326,12 @@ def main(argv: list[str] | None = None) -> int:
         stream=(
             sys.stderr
             if args.comando
-            in ("youtube-auth", "youtube-auth-bootstrap", "youtube-auth-device")
+            in (
+                "publish",
+                "youtube-auth",
+                "youtube-auth-bootstrap",
+                "youtube-auth-device",
+            )
             else None
         ),
     )
@@ -261,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
             # Y el mismo criterio de código de salida, por el mismo motivo:
             # ``autenticado`` también es cierto para WRONG_CHANNEL.
             return 0 if resultado.comprobacion.resultado is ResultadoAuth.autenticado else 1
+
+        if args.comando == "publish":
+            return _publicar(args, settings)
 
         etapas = PIPELINES[args.pipeline]()
 
